@@ -11,6 +11,7 @@ from flask import Flask, jsonify, render_template, request, send_from_directory
 from werkzeug.utils import secure_filename
 
 from audit_engine import AuditEngine, ConfigManager
+from proposal_engine import BacklogManager, ProposalEngine, ProposalState, TraceAdapter
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "audit_config.json"
@@ -30,6 +31,36 @@ app.config["SECRET_KEY"] = os.getenv(
 
 config_manager = ConfigManager(CONFIG_PATH)
 audit_engine = AuditEngine(config_manager)
+
+# ---------------------------------------------------------------------------
+# Proposal Engine – lazy initialisation so the app still starts when
+# the proposal_engine section is absent from the config.
+# ---------------------------------------------------------------------------
+
+def _build_proposal_engine() -> ProposalEngine:
+    pe_cfg = config_manager.config.get("proposal_engine", {})
+    backlog_dir = pe_cfg.get("backlog_dir", "proposals")
+    if not Path(backlog_dir).is_absolute():
+        backlog_dir = str(BASE_DIR / backlog_dir)
+
+    trace_path = pe_cfg.get("trace_events_path", "traces/events.jsonl")
+    if not Path(trace_path).is_absolute():
+        trace_path = str(BASE_DIR / trace_path)
+
+    backlog = BacklogManager(backlog_dir)
+    tracer = TraceAdapter(trace_path)
+    detector_configs = pe_cfg.get("detectors", {})
+    file_filtering = config_manager.get_file_filtering()
+
+    return ProposalEngine(
+        backlog_manager=backlog,
+        trace_adapter=tracer,
+        detector_configs=detector_configs,
+        file_filtering=file_filtering,
+    )
+
+
+proposal_engine = _build_proposal_engine()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -386,6 +417,118 @@ def get_report(filename):
         return jsonify({'success': True, 'report': report_data})
     except Exception as e:
         logger.error(f"Error getting report: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================================================
+# API Routes - Proposal Engine
+# ============================================================================
+
+@app.route('/api/proposals/scan', methods=['POST'])
+def run_proposal_scan():
+    """Run a proposal scan on a project directory."""
+    try:
+        data = _get_json_payload()
+        raw_project_path = data.get('project_path')
+
+        if not raw_project_path:
+            return jsonify({'success': False, 'error': 'Missing project_path'}), 400
+
+        project_path = Path(str(raw_project_path)).expanduser().resolve()
+        if not project_path.is_dir():
+            return jsonify({
+                'success': False,
+                'error': f'Project path does not exist or is not a directory: {project_path}'
+            }), 400
+
+        logger.info(f"Starting proposal scan on {project_path}")
+        proposals = proposal_engine.run_proposal_scan(str(project_path))
+
+        return jsonify({
+            'success': True,
+            'message': f'Proposal scan complete: {len(proposals)} proposal(s) generated.',
+            'proposal_count': len(proposals),
+            'proposals': [p.to_dict() for p in proposals],
+        })
+    except Exception as e:
+        logger.error(f"Error running proposal scan: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/proposals', methods=['GET'])
+def list_proposals():
+    """List all proposals, optionally filtered by state."""
+    try:
+        state = request.args.get('state')
+        if state and state not in {s.value for s in ProposalState}:
+            return jsonify({'success': False, 'error': f'Invalid state: {state}'}), 400
+
+        proposals = proposal_engine.backlog.list_proposals(state=state)
+        return jsonify({
+            'success': True,
+            'proposals': [p.to_dict() for p in proposals],
+            'total': len(proposals),
+        })
+    except Exception as e:
+        logger.error(f"Error listing proposals: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/proposals/<proposal_id>', methods=['GET'])
+def get_proposal(proposal_id):
+    """Get a specific proposal by ID."""
+    try:
+        proposal = proposal_engine.backlog.get_proposal(proposal_id)
+        if proposal is None:
+            return jsonify({'success': False, 'error': 'Proposal not found'}), 404
+        return jsonify({'success': True, 'proposal': proposal.to_dict()})
+    except Exception as e:
+        logger.error(f"Error getting proposal {proposal_id}: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/proposals/<proposal_id>/state', methods=['POST'])
+def update_proposal_state(proposal_id):
+    """Transition a proposal to a new state."""
+    try:
+        data = _get_json_payload()
+        new_state = data.get('state')
+
+        if not new_state:
+            return jsonify({'success': False, 'error': 'Missing state'}), 400
+        if new_state not in {s.value for s in ProposalState}:
+            return jsonify({'success': False, 'error': f'Invalid state: {new_state}'}), 400
+
+        proposal = proposal_engine.backlog.transition_state(proposal_id, new_state)
+        if proposal is None:
+            return jsonify({
+                'success': False,
+                'error': f'Transition to {new_state!r} not allowed or proposal not found'
+            }), 400
+
+        # Emit validation trace event when a proposal is approved or rejected
+        if new_state in (ProposalState.VALIDATED, ProposalState.REJECTED):
+            reason = data.get('reason')
+            proposal_engine.tracer.emit_validation(
+                proposal_id=proposal_id,
+                decision=new_state,
+                reason=reason,
+            )
+
+        return jsonify({'success': True, 'proposal': proposal.to_dict()})
+    except Exception as e:
+        logger.error(f"Error updating proposal state {proposal_id}: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/proposals/scans', methods=['GET'])
+def list_proposal_scans():
+    """List past proposal scan summaries."""
+    try:
+        scans = proposal_engine.backlog.list_scans()
+        return jsonify({'success': True, 'scans': scans})
+    except Exception as e:
+        logger.error(f"Error listing proposal scans: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 

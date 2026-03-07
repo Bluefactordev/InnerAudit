@@ -1,2 +1,4 @@
 Flask>=3.1
 aider-chat
+# InnerTrace: event-sourced tracing for LLM systems (optional – graceful fallback if unavailable)
+git+https://github.com/Bluefactordev/InnerTrace.git#egg=innertrace
