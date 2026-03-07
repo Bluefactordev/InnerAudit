@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>InnerAudit - Code Audit System</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 20px;
+            padding: 60px 40px;
+            max-width: 600px;
+            width: 100%;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            text-align: center;
+        }
+        
+        h1 {
+            color: #667eea;
+            font-size: 3em;
+            margin-bottom: 20px;
+            font-weight: 700;
+        }
+        
+        .subtitle {
+            color: #666;
+            font-size: 1.2em;
+            margin-bottom: 40px;
+        }
+        
+        .buttons {
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        
+        .btn {
+            padding: 15px 40px;
+            font-size: 1.1em;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            text-decoration: none;
+            transition: all 0.3s;
+            font-weight: 600;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn-secondary {
+            background: #f0f0f0;
+            color: #333;
+        }
+        
+        .btn-secondary:hover {
+            background: #e0e0e0;
+            transform: translateY(-2px);
+        }
+        
+        .features {
+            margin-top: 50px;
+            text-align: left;
+        }
+        
+        .feature {
+            padding: 15px;
+            margin: 10px 0;
+            background: #f8f9fa;
+            border-radius: 10px;
+            border-left: 4px solid #667eea;
+        }
+        
+        .feature h3 {
+            color: #667eea;
+            margin-bottom: 5px;
+        }
+        
+        .feature p {
+            color: #666;
+            font-size: 0.95em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔍 InnerAudit</h1>
+        <p class="subtitle">Sistema di Audit del Codice con AI</p>
+        
+        <div class="buttons">
+            <a href="/audit" class="btn btn-primary">Avvia Audit</a>
+            <a href="/reports" class="btn btn-secondary">Vedi Report</a>
+        </div>
+        
+        <div class="features">
+            <div class="feature">
+                <h3>✨ Analisi AI-Powered</h3>
+                <p>Utilizza modelli AI avanzati per analizzare il codice e identificare problemi</p>
+            </div>
+            <div class="feature">
+                <h3>📋 Best Practices</h3>
+                <p>Verifica automatica del rispetto delle best practices configurabili</p>
+            </div>
+            <div class="feature">
+                <h3>🔒 Sicurezza</h3>
+                <p>Identifica vulnerabilità e problemi di sicurezza nel codice</p>
+            </div>
+            <div class="feature">
+                <h3>📊 Report Dettagliati</h3>
+                <p>Genera report completi con findings categorizzati per severità</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

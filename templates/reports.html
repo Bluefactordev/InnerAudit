@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reports - InnerAudit</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #f5f7fa;
+            padding: 20px;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 15px;
+            margin-bottom: 30px;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        
+        .header .back-link {
+            color: white;
+            text-decoration: none;
+            opacity: 0.9;
+        }
+        
+        .header .back-link:hover {
+            opacity: 1;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        .card {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        .reports-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+            gap: 20px;
+        }
+        
+        .report-card {
+            background: white;
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .report-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 5px 20px rgba(0,0,0,0.15);
+        }
+        
+        .report-card h3 {
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+        
+        .report-meta {
+            color: #666;
+            font-size: 0.9em;
+            margin-bottom: 15px;
+        }
+        
+        .report-stats {
+            display: flex;
+            justify-content: space-between;
+            padding-top: 15px;
+            border-top: 1px solid #e0e0e0;
+        }
+        
+        .stat {
+            text-align: center;
+        }
+        
+        .stat-value {
+            font-size: 1.5em;
+            font-weight: 700;
+            color: #667eea;
+        }
+        
+        .stat-label {
+            font-size: 0.85em;
+            color: #666;
+        }
+        
+        .critical {
+            color: #dc3545 !important;
+        }
+        
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+            overflow-y: auto;
+        }
+        
+        .modal-content {
+            background: white;
+            max-width: 1200px;
+            margin: 50px auto;
+            border-radius: 15px;
+            padding: 30px;
+        }
+        
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        
+        .modal-close {
+            font-size: 2em;
+            cursor: pointer;
+            color: #666;
+        }
+        
+        .findings-list {
+            margin-top: 20px;
+        }
+        
+        .finding {
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 8px;
+            border-left: 4px solid;
+        }
+        
+        .finding.critical {
+            background: #f8d7da;
+            border-color: #dc3545;
+        }
+        
+        .finding.high {
+            background: #fff3cd;
+            border-color: #ffc107;
+        }
+        
+        .finding.medium {
+            background: #d1ecf1;
+            border-color: #17a2b8;
+        }
+        
+        .finding.low {
+            background: #d4edda;
+            border-color: #28a745;
+        }
+        
+        .finding-header {
+            font-weight: 600;
+            margin-bottom: 5px;
+        }
+        
+        .finding-description {
+            color: #666;
+            margin-bottom: 10px;
+        }
+        
+        .finding-code {
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 5px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            overflow-x: auto;
+        }
+
+        .analysis-block {
+            margin-bottom: 25px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+
+        .analysis-meta {
+            color: #666;
+            margin: 8px 0 15px;
+        }
+
+        .analysis-error {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 12px;
+            border-radius: 8px;
+            margin: 12px 0;
+        }
+
+        .lint-box {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 12px;
+            margin: 12px 0;
+        }
+
+        .lint-box code {
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <a href="/" class="back-link">← Torna alla Home</a>
+            <h1>📊 Report Audit</h1>
+            <p>Visualizza i risultati delle analisi</p>
+        </div>
+        
+        <div id="reportsList" class="reports-grid">
+            <p>Caricamento report...</p>
+        </div>
+    </div>
+    
+    <div id="reportModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="modalTitle">Report Details</h2>
+                <span class="modal-close" onclick="closeModal()">&times;</span>
+            </div>
+            <div id="modalBody"></div>
+        </div>
+    </div>
+    
+    <script>
+        async function loadReports() {
+            try {
+                const response = await fetch('/api/reports');
+                const data = await response.json();
+                
+                if (data.success) {
+                    const container = document.getElementById('reportsList');
+                    
+                    if (data.reports.length === 0) {
+                        container.innerHTML = '<p style="text-align: center; color: #666;">Nessun report disponibile</p>';
+                        return;
+                    }
+                    
+                    container.innerHTML = '';
+                    data.reports.forEach(report => {
+                        const card = document.createElement('div');
+                        card.className = 'report-card';
+                        card.onclick = () => viewReport(report.filename);
+                        
+                        const date = new Date(report.timestamp);
+                        const dateStr = date.toLocaleString('it-IT');
+                        
+                        card.innerHTML = `
+                            <h3>${report.platform}</h3>
+                            <div class="report-meta">
+                                <div>📅 ${dateStr}</div>
+                                <div>📁 ${report.project_path}</div>
+                            </div>
+                            <div class="report-stats">
+                                <div class="stat">
+                                    <div class="stat-value">${report.total_files}</div>
+                                    <div class="stat-label">File</div>
+                                </div>
+                                <div class="stat">
+                                    <div class="stat-value">${report.total_findings}</div>
+                                    <div class="stat-label">Findings</div>
+                                </div>
+                                <div class="stat">
+                                    <div class="stat-value critical">${report.critical_findings}</div>
+                                    <div class="stat-label">Critici</div>
+                                </div>
+                            </div>
+                        `;
+                        
+                        container.appendChild(card);
+                    });
+                }
+            } catch (error) {
+                console.error('Error loading reports:', error);
+            }
+        }
+        
+        async function viewReport(filename) {
+            try {
+                const response = await fetch(`/api/reports/${filename}`);
+                const data = await response.json();
+                
+                if (data.success) {
+                    const report = data.report;
+                    const modal = document.getElementById('reportModal');
+                    const modalBody = document.getElementById('modalBody');
+                    
+                    // Build modal content
+                    let html = `
+                        <div class="card">
+                            <h3>Metadata</h3>
+                            <p><strong>Progetto:</strong> ${report.metadata.project_path}</p>
+                            <p><strong>Platform:</strong> ${report.metadata.platform}</p>
+                            <p><strong>Modello:</strong> ${report.metadata.model.name}</p>
+                            <p><strong>Totale File:</strong> ${report.metadata.total_files}</p>
+                            <p><strong>Analisi Riuscite:</strong> ${report.metadata.successful_analyses}</p>
+                            <p><strong>Analisi Fallite:</strong> ${report.metadata.failed_analyses}</p>
+                            <p><strong>Totale Findings:</strong> ${report.metadata.total_findings}</p>
+                            <p><strong>Findings Critici:</strong> ${report.metadata.critical_findings}</p>
+                        </div>
+                        
+                        <div class="card">
+                            <h3>Findings</h3>
+                            <div class="findings-list">
+                    `;
+                    
+                    report.results.forEach(result => {
+                        const findings = result.findings || [];
+                        html += `
+                            <div class="analysis-block">
+                                <h4>${result.file_path}</h4>
+                                <div class="analysis-meta">
+                                    <strong>Analisi:</strong> ${result.analysis_type}
+                                    ${result.score !== undefined ? ` | <strong>Score:</strong> ${result.score}` : ''}
+                                    ${result.execution_time ? ` | <strong>Tempo:</strong> ${result.execution_time.toFixed(2)}s` : ''}
+                                </div>
+                        `;
+
+                        if (result.error) {
+                            html += `<div class="analysis-error">${result.error}</div>`;
+                        }
+
+                        if (result.linter_results) {
+                            const lintItems = Object.entries(result.linter_results).map(([name, lint]) => {
+                                const status = lint.available === false
+                                    ? 'non disponibile'
+                                    : lint.success
+                                        ? 'ok'
+                                        : 'warning/error';
+                                const details = lint.error || lint.stderr || lint.stdout || '';
+                                return `
+                                    <div style="margin-bottom: 10px;">
+                                        <strong>${name}</strong>: ${status}
+                                        ${details ? `<div><code>${details}</code></div>` : ''}
+                                    </div>
+                                `;
+                            }).join('');
+
+                            html += `<div class="lint-box"><strong>Linting</strong>${lintItems}</div>`;
+                        }
+
+                        if (findings.length === 0) {
+                            html += '<p style="color: #666;">Nessun finding strutturato per questa analisi.</p>';
+                        }
+
+                        findings.forEach(finding => {
+                            const severity = finding.severity || 'medium';
+                            html += `
+                                <div class="finding ${severity}">
+                                    <div class="finding-header">
+                                        [${severity.toUpperCase()}] ${finding.category || finding.type || 'General'}
+                                    </div>
+                                    <div class="finding-description">
+                                        ${finding.description || 'No description'}
+                                    </div>
+                                    ${finding.line_number ? `<p><strong>Linea:</strong> ${finding.line_number}</p>` : ''}
+                                    ${finding.code_snippet ? `<div class="finding-code">${finding.code_snippet}</div>` : ''}
+                                    ${finding.recommendation ? `<p><strong>Raccomandazione:</strong> ${finding.recommendation}</p>` : ''}
+                                </div>
+                            `;
+                        });
+
+                        html += '</div>';
+                    });
+                    
+                    html += `
+                            </div>
+                        </div>
+                    `;
+                    
+                    modalBody.innerHTML = html;
+                    modal.style.display = 'block';
+                }
+            } catch (error) {
+                console.error('Error viewing report:', error);
+            }
+        }
+        
+        function closeModal() {
+            document.getElementById('reportModal').style.display = 'none';
+        }
+        
+        // Close modal on outside click
+        window.onclick = function(event) {
+            const modal = document.getElementById('reportModal');
+            if (event.target === modal) {
+                closeModal();
+            }
+        };
+        
+        // Load reports on page load
+        loadReports();
+    </script>
+</body>
+</html>

@@ -1,0 +1,186 @@
+{
+  "version": "1.0.0",
+  "description": "Configuration file for the Audit Manager system - Aider-Centric",
+  "default_model": "qwen3-30b-thinking",
+  "platforms": {
+    "python": {
+      "name": "Python Backend",
+      "file_extensions": [".py"],
+      "linters": {
+        "pylint": {
+          "enabled": true,
+          "command": "pylint",
+          "args": ["--errors-only"]
+        },
+        "flake8": {
+          "enabled": true,
+          "command": "flake8",
+          "args": ["--max-line-length=120", "--ignore=E501,W503"]
+        }
+      },
+      "analysis_types": {
+        "deep_scan": {
+          "name": "Deep Security & Logic Scan",
+          "scope": ["file"],
+          "prompt_template": "Analizza {file_path}. Contesto: {context}. [SUPER-PROMPT: Sei un Auditor di Codice Senior. Il tuo compito e analizzare il codice per problemi di sicurezza, logica, performance e best practices. RISPONDI SOLO IN FORMATO JSON VALIDO, senza testo prima o dopo. Il JSON deve avere questa struttura esatta: {\"findings\": [{\"severity\": \"critical|high|medium|low\", \"category\": \"security|logic|performance|best_practice\", \"description\": \"descrizione del problema\", \"line_number\": numero_riga_opzionale, \"code_snippet\": \"snippet_opzionale\", \"recommendation\": \"raccomandazione per fixare\"}], \"summary\": \"riepilogo dell'analisi\", \"overall_score\": 0-100}]"
+        },
+        "security_scan": {
+          "name": "Security Vulnerability Scan",
+          "scope": ["file", "subsystem"],
+          "prompt_template": "Analizza {file_path} per vulnerabilita di sicurezza. Contesto: {context}. [SUPER-PROMPT: Sei un Security Auditor. Cerca: SQL Injection, XSS, CSRF, autenticazione/autorizzazione, exposure dati sensibili, dependency injection. RISPONDI SOLO IN FORMATO JSON VALIDO: {\"vulnerabilities\": [{\"severity\": \"critical|high|medium|low\", \"type\": \"tipo_vulnerabilita\", \"description\": \"descrizione\", \"line_number\": numero, \"code_snippet\": \"snippet\", \"recommendation\": \"fix\"}], \"security_score\": 0-100}]"
+        },
+        "code_quality": {
+          "name": "Code Quality Analysis",
+          "scope": ["file"],
+          "prompt_template": "Analizza la qualita del codice in {file_path}. Contesto: {context}. [SUPER-PROMPT: Valuta: struttura, leggibilita, naming conventions, duplicazione, design patterns. RISPONDI SOLO IN FORMATO JSON VALIDO: {\"issues\": [{\"severity\": \"critical|high|medium|low\", \"category\": \"structure|readability|naming|duplication|patterns\", \"description\": \"descrizione\", \"line_number\": numero, \"code_snippet\": \"snippet\", \"recommendation\": \"fix\"}], \"quality_score\": 0-100}]"
+        },
+        "performance": {
+          "name": "Performance Analysis",
+          "scope": ["file", "subsystem"],
+          "prompt_template": "Analizza le performance del codice in {file_path}. Contesto: {context}. [SUPER-PROMPT: Cerca: complessita algoritmica, query DB inefficienti, memory leaks, caching opportunities, async/await usage. RISPONDI SOLO IN FORMATO JSON VALIDO: {\"performance_issues\": [{\"severity\": \"critical|high|medium|low\", \"type\": \"complexity|database|memory|caching|async\", \"description\": \"descrizione\", \"line_number\": numero, \"code_snippet\": \"snippet\", \"recommendation\": \"optimization\"}], \"performance_score\": 0-100}]"
+        }
+      }
+    },
+    "php": {
+      "name": "PHP Backend",
+      "file_extensions": [".php"],
+      "linters": {
+        "phpcs": {
+          "enabled": true,
+          "command": "phpcs",
+          "args": ["--standard=PSR12", "--report=json"]
+        },
+        "phpstan": {
+          "enabled": true,
+          "command": "phpstan",
+          "args": ["analyse", "--error-format=json", "--level=5"]
+        }
+      },
+      "analysis_types": {
+        "deep_scan": {
+          "name": "Deep Security & Logic Scan",
+          "scope": ["file"],
+          "prompt_template": "Analizza {file_path}. Contesto: {context}. [SUPER-PROMPT: Sei un Auditor di Codice PHP Senior. Il tuo compito e analizzare il codice per problemi di sicurezza, logica, performance e best practices. RISPONDI SOLO IN FORMATO JSON VALIDO: {\"findings\": [{\"severity\": \"critical|high|medium|low\", \"category\": \"security|logic|performance|best_practice\", \"description\": \"descrizione\", \"line_number\": numero, \"code_snippet\": \"snippet_opzionale\", \"recommendation\": \"fix\"}], \"summary\": \"riepilogo\", \"overall_score\": 0-100}]"
+        },
+        "security_scan": {
+          "name": "Security Vulnerability Scan",
+          "scope": ["file", "subsystem"],
+          "prompt_template": "Analizza {file_path} per vulnerabilita di sicurezza PHP. Contesto: {context}. [SUPER-PROMPT: Cerca: SQL Injection, XSS, CSRF, autenticazione/autorizzazione, exposure dati, dependency injection. RISPONDI SOLO IN FORMATO JSON VALIDO: {\"vulnerabilities\": [{\"severity\": \"critical|high|medium|low\", \"type\": \"tipo\", \"description\": \"descrizione\", \"line_number\": numero, \"code_snippet\": \"snippet\", \"recommendation\": \"fix\"}], \"security_score\": 0-100}]"
+        }
+      }
+    }
+  },
+  "models": [
+    {
+      "id": "qwen3-30b-thinking",
+      "name": "Qwen3 30B Thinking (Local)",
+      "type": "vllm",
+      "api_base": "http://localhost:8001/v1",
+      "api_key": "sk-dummy",
+      "model_name": "cpatonn/Qwen3-30B-A3B-Thinking-2507-AWQ-4bit",
+      "timeout": 180,
+      "max_tokens": 8192,
+      "temperature": 0.2
+    },
+    {
+      "id": "apriel-1.6-15b",
+      "name": "Apriel 1.6 15B Thinker (Local)",
+      "type": "vllm",
+      "api_base": "http://localhost:8000/v1",
+      "api_key": "sk-dummy",
+      "model_name": "cyankiwi/Apriel-1.6-15B-Thinker-AWQ-4bit",
+      "timeout": 180,
+      "max_tokens": 8192,
+      "temperature": 0.2
+    },
+    {
+      "id": "gpt-oss-120b",
+      "name": "GPT-OSS 120B (BFPersonal Local)",
+      "type": "vllm",
+      "api_base": "http://localhost:8000/v1",
+      "api_key": "sk-dummy",
+      "model_name": "openai/gpt-oss-120b",
+      "timeout": 180,
+      "max_tokens": 8192,
+      "temperature": 0.2,
+      "extra_body": {
+        "reasoning_effort": "medium"
+      }
+    },
+    {
+      "id": "qwen-coder-32b",
+      "name": "Qwen 2.5 Coder 32B (Local)",
+      "type": "vllm",
+      "api_base": "http://localhost:8000/v1",
+      "api_key": "sk-dummy",
+      "model_name": "Qwen/Qwen2.5-Coder-32B-Instruct",
+      "timeout": 120,
+      "max_tokens": 4096,
+      "temperature": 0.3
+    },
+    {
+      "id": "llama-70b",
+      "name": "Llama 3.1 70B (Local vLLM)",
+      "type": "vllm",
+      "api_base": "http://localhost:8000/v1",
+      "api_key": "sk-dummy",
+      "model_name": "meta-llama/Llama-3.1-70B-Instruct",
+      "timeout": 120,
+      "max_tokens": 4096,
+      "temperature": 0.3
+    },
+    {
+      "id": "openai-gpt4",
+      "name": "GPT-4o (OpenAI Cloud)",
+      "type": "openai",
+      "api_base": "https://api.openai.com/v1",
+      "api_key": "$OPENAI_API_KEY",
+      "model_name": "gpt-4o",
+      "timeout": 120,
+      "max_tokens": 4096,
+      "temperature": 0.3
+    }
+  ],
+  "file_filtering": {
+    "description": "Configure which directories/files to include or exclude from audit",
+    "include_patterns": [],
+    "exclude_patterns": [
+      "node_modules",
+      "__pycache__",
+      ".venv",
+      "venv",
+      ".git",
+      "dist",
+      "build",
+      "*.egg-info",
+      ".pytest_cache",
+      ".mypy_cache",
+      "logs/old_logs",
+      "test_results*",
+      "audit_reports",
+      ".ag-venv",
+      ".cursor",
+      ".claude"
+    ],
+    "default_behavior": "include_all"
+  },
+  "aider": {
+    "enabled": true,
+    "command": "aider",
+    "args": ["--no-git", "--no-auto-commits", "--yes"],
+    "timeout": 300,
+    "max_retries": 2,
+    "continue_on_error": true
+  },
+  "output": {
+    "report_dir": "audit_reports",
+    "format": "json",
+    "include_code_snippets": true,
+    "max_snippet_lines": 10
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "inneraudit.log",
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  }
+}
