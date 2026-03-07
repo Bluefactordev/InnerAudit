@@ -164,6 +164,38 @@
     ],
     "default_behavior": "include_all"
   },
+  "model_roles": {
+    "description": "Assign model IDs to conceptual roles used by the proposal engine",
+    "scanner_model": "qwen3-30b-thinking",
+    "validator_model": "openai-gpt4"
+  },
+  "proposal_engine": {
+    "enabled": true,
+    "backlog_dir": "proposals",
+    "trace_events_path": "traces/events.jsonl",
+    "detectors": {
+      "hardcoded_model_names": {
+        "enabled": true,
+        "severity": "high",
+        "priority": "p1"
+      },
+      "hardcoded_constants": {
+        "enabled": true,
+        "severity": "medium",
+        "priority": "p2"
+      },
+      "non_agnostic_prompts": {
+        "enabled": true,
+        "severity": "high",
+        "priority": "p1"
+      },
+      "leaked_project_ids": {
+        "enabled": true,
+        "severity": "critical",
+        "priority": "p0"
+      }
+    }
+  },
   "aider": {
     "enabled": true,
     "command": "aider",
