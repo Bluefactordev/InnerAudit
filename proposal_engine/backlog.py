@@ -2,7 +2,6 @@
 
 import json
 import logging
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -68,10 +67,25 @@ class BacklogManager:
         proposals: List[Proposal],
         scan_id: Optional[str] = None,
     ) -> None:
-        """Persist *proposals* into the backlog index (merge, not overwrite)."""
+        """Persist *proposals* into the backlog index with idempotent upsert.
+
+        When a proposal with the same deterministic ID already exists in the
+        index its lifecycle *state* is preserved (so a manually promoted
+        CANDIDATE stays CANDIDATE after a rescan).  Only ``scan_id`` and
+        ``updated_at`` are refreshed to reflect the latest observation.
+        """
         index = self._load_index()
+        now = datetime.now(timezone.utc).isoformat()
         for proposal in proposals:
-            index["proposals"][proposal.id] = proposal.to_dict()
+            existing = index["proposals"].get(proposal.id)
+            if existing is not None:
+                # Preserve current lifecycle state; refresh scan pointer only.
+                if proposal.scan_id is not None:
+                    existing["scan_id"] = proposal.scan_id
+                existing["updated_at"] = now
+                index["proposals"][proposal.id] = existing
+            else:
+                index["proposals"][proposal.id] = proposal.to_dict()
         self._save_index(index)
 
         if scan_id:

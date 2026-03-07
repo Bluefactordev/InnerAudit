@@ -50,13 +50,12 @@ def _build_proposal_engine() -> ProposalEngine:
     backlog = BacklogManager(backlog_dir)
     tracer = TraceAdapter(trace_path)
     detector_configs = pe_cfg.get("detectors", {})
-    file_filtering = config_manager.get_file_filtering()
 
     return ProposalEngine(
         backlog_manager=backlog,
         trace_adapter=tracer,
         detector_configs=detector_configs,
-        file_filtering=file_filtering,
+        file_filtering=config_manager.get_file_filtering,  # callable – re-read on every scan
     )
 
 

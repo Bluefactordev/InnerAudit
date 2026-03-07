@@ -1,9 +1,10 @@
 """ProposalEngine – orchestrates the scan → detect → persist pipeline."""
 
+import fnmatch
 import logging
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from .backlog import BacklogManager
 from .detector import BaseDetector, build_detectors
@@ -14,6 +15,46 @@ logger = logging.getLogger("ProposalEngine")
 
 # File extensions processed by the static detectors.
 _SUPPORTED_EXTENSIONS = {".py", ".php", ".js", ".ts"}
+
+
+def _matches_pattern(file_path: Path, project_path: Path, patterns: List[str]) -> bool:
+    """Mirror AuditEngine._matches_pattern for consistent file filtering.
+
+    Supports both fnmatch wildcards and case-insensitive substring / path-part
+    matching so that patterns such as "node_modules", "*.min.js", or
+    "src/generated" all work as expected.
+    """
+    if not patterns:
+        return False
+
+    relative_path = file_path.relative_to(project_path).as_posix()
+    basename = file_path.name
+    relative_parts = relative_path.lower().split("/")
+    candidates = [
+        relative_path,
+        relative_path.lower(),
+        basename,
+        basename.lower(),
+        file_path.as_posix(),
+        file_path.as_posix().lower(),
+    ]
+
+    for raw_pattern in patterns:
+        pattern = raw_pattern.strip().replace("\\", "/")
+        if not pattern:
+            continue
+
+        normalized_pattern = pattern.lower()
+        if normalized_pattern in relative_parts:
+            return True
+
+        for candidate in candidates:
+            if fnmatch.fnmatch(candidate, pattern):
+                return True
+            if normalized_pattern in candidate.lower():
+                return True
+
+    return False
 
 
 class ProposalEngine:
@@ -38,18 +79,34 @@ class ProposalEngine:
         backlog_manager: BacklogManager,
         trace_adapter: Optional[TraceAdapter] = None,
         detector_configs: Optional[Dict[str, Any]] = None,
-        file_filtering: Optional[Dict[str, Any]] = None,
+        file_filtering: Union[Dict[str, Any], Callable[[], Dict[str, Any]], None] = None,
     ):
         self.backlog = backlog_manager
         self.tracer = trace_adapter or TraceAdapter()
         self.detectors: List[BaseDetector] = build_detectors(detector_configs or {})
-        self._file_filtering = file_filtering or {}
+
+        # Accept either a static dict or a callable that returns the current
+        # filtering configuration.  Using a callable means changes made via
+        # /api/file-filtering are picked up on the *next* scan without a
+        # process restart.
+        if callable(file_filtering):
+            self._file_filtering_source: Callable[[], Dict[str, Any]] = file_filtering
+        else:
+            # Make a shallow copy so that mutations to the caller's dict after
+            # construction do not affect this engine.  If live-reload behaviour
+            # is needed, pass a callable instead.
+            _static: Dict[str, Any] = dict(file_filtering) if file_filtering else {}
+            self._file_filtering_source = lambda: _static
 
         logger.info(
             "ProposalEngine initialised with %d detector(s): %s",
             len(self.detectors),
             [d.rule_id for d in self.detectors],
         )
+
+    def _get_file_filtering(self) -> Dict[str, Any]:
+        """Return the current file-filtering configuration."""
+        return self._file_filtering_source()
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -128,22 +185,43 @@ class ProposalEngine:
     # ------------------------------------------------------------------
 
     def _discover_files(self, project_path: str) -> List[str]:
-        """Return source files eligible for proposal scanning."""
-        root = Path(project_path)
-        exclude_patterns = self._file_filtering.get("exclude_patterns", [])
+        """Return source files eligible for proposal scanning.
 
-        found: List[str] = []
+        Mirrors ``AuditEngine.discover_files`` so that ``include_patterns``,
+        ``exclude_patterns``, and ``default_behavior`` (include_all / include_only
+        / exclude_only) are all honoured — not just ``exclude_patterns``.
+        """
+        root = Path(project_path)
+        filtering = self._get_file_filtering()
+        include_patterns: List[str] = filtering.get("include_patterns", [])
+        exclude_patterns: List[str] = filtering.get("exclude_patterns", [])
+        default_behavior: str = filtering.get("default_behavior", "include_all")
+
+        files: set = set()
         for ext in _SUPPORTED_EXTENSIONS:
             for path in root.rglob(f"*{ext}"):
-                if not path.is_file():
-                    continue
-                rel = path.relative_to(root).as_posix()
-                if any(pat in rel for pat in exclude_patterns if pat):
-                    continue
-                found.append(str(path.resolve()))
+                if path.is_file():
+                    files.add(path.resolve())
 
-        found.sort()
-        return found
+        filtered: List[str] = []
+        for file_path in sorted(files):
+            include_match = _matches_pattern(file_path, root, include_patterns)
+            exclude_match = _matches_pattern(file_path, root, exclude_patterns)
+
+            if default_behavior == "include_only":
+                keep_file = bool(include_patterns) and include_match and not exclude_match
+            else:
+                keep_file = not exclude_match
+
+            if keep_file:
+                filtered.append(str(file_path))
+
+        logger.info(
+            "Proposal scan discovered %d file(s) (filtering mode: %s).",
+            len(filtered),
+            default_behavior,
+        )
+        return filtered
 
     def _scan_file(self, file_path: str, scan_id: str) -> List[Proposal]:
         """Run all enabled detectors on a single file."""

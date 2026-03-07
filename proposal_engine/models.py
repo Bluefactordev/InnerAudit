@@ -1,10 +1,32 @@
 """Proposal data model for the Software Improvement Engine."""
 
+import hashlib
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
+
+# Fixed namespace UUID used to derive deterministic proposal IDs.
+# This is a project-specific UUID (not a standard IANA namespace) chosen
+# to scope proposal IDs to InnerAudit.  Changing this value would
+# invalidate all previously-stored IDs.
+_PROPOSAL_NAMESPACE = uuid.UUID("7ba4b810-9dad-11d1-80b4-00c04fd430c8")
+
+
+def make_proposal_id(
+    rule_id: str,
+    file_path: str,
+    line_number: Optional[int] = None,
+) -> str:
+    """Return a deterministic proposal ID derived from rule + file location.
+
+    Two detections of the same rule violation at the same file/line always
+    produce the same ID, which makes the backlog idempotent across repeated
+    scans of unchanged code.
+    """
+    key = f"{rule_id}:{file_path}:{line_number if line_number is not None else ''}"
+    return str(uuid.uuid5(_PROPOSAL_NAMESPACE, key))
 
 
 class ProposalState(str, Enum):
@@ -85,8 +107,16 @@ class Proposal:
         scan_id: Optional[str] = None,
     ) -> "Proposal":
         now = datetime.now(timezone.utc).isoformat()
+        # Derive a deterministic ID from the primary evidence location so that
+        # repeated scans of the same violation do not create duplicate entries.
+        primary = evidence[0] if evidence else {}
+        proposal_id = make_proposal_id(
+            source_rule or proposal_type,
+            primary.get("file_path", ""),
+            primary.get("line_number"),
+        )
         return cls(
-            id=str(uuid.uuid4()),
+            id=proposal_id,
             type=proposal_type,
             title=title,
             description=description,

@@ -15,6 +15,7 @@ from proposal_engine.models import (
     ALLOWED_TRANSITIONS,
     Proposal,
     ProposalState,
+    make_proposal_id,
 )
 from proposal_engine.detector import (
     HardcodedConstantDetector,
@@ -414,3 +415,209 @@ class TestProposalEngine:
 
         proposals = engine.run_proposal_scan(str(tmp_path))
         assert len(proposals) == 0
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: Backlog idempotency
+# ---------------------------------------------------------------------------
+
+class TestBacklogIdempotency:
+    def test_same_rule_file_line_produces_same_id(self):
+        """Two Proposal.create() calls for the same location share an ID."""
+        kwargs = dict(
+            proposal_type="hardcoded_model_names",
+            title="T1",
+            description="D",
+            evidence=[{"file_path": "foo.py", "line_number": 5}],
+            severity="high",
+            priority="p1",
+            confidence=0.9,
+            risk_level="medium",
+            autofixable=False,
+            recommendation="R",
+            source_rule="hardcoded_model_names",
+        )
+        p1 = Proposal.create(**kwargs)
+        kwargs2 = dict(kwargs)
+        kwargs2["title"] = "T2 (same location, different title)"
+        p2 = Proposal.create(**kwargs2)
+        assert p1.id == p2.id
+
+    def test_different_line_different_id(self):
+        base = dict(
+            proposal_type="hardcoded_model_names",
+            title="T",
+            description="D",
+            severity="high",
+            priority="p1",
+            confidence=0.9,
+            risk_level="medium",
+            autofixable=False,
+            recommendation="R",
+            source_rule="hardcoded_model_names",
+        )
+        p1 = Proposal.create(**base, evidence=[{"file_path": "foo.py", "line_number": 5}])
+        p2 = Proposal.create(**base, evidence=[{"file_path": "foo.py", "line_number": 10}])
+        assert p1.id != p2.id
+
+    def test_different_rule_different_id(self):
+        base = dict(
+            title="T",
+            description="D",
+            evidence=[{"file_path": "foo.py", "line_number": 5}],
+            severity="high",
+            priority="p1",
+            confidence=0.9,
+            risk_level="medium",
+            autofixable=False,
+            recommendation="R",
+        )
+        p1 = Proposal.create(**base, proposal_type="rule_a", source_rule="rule_a")
+        p2 = Proposal.create(**base, proposal_type="rule_b", source_rule="rule_b")
+        assert p1.id != p2.id
+
+    def test_make_proposal_id_is_deterministic(self):
+        id1 = make_proposal_id("rule_x", "src/main.py", 42)
+        id2 = make_proposal_id("rule_x", "src/main.py", 42)
+        assert id1 == id2
+
+    def test_double_scan_no_backlog_growth(self, tmp_path):
+        """Running the same scan twice must not grow the backlog."""
+        src = tmp_path / "service.py"
+        src.write_text('model_name = "gpt-4-turbo"\n', encoding="utf-8")
+
+        backlog = BacklogManager(tmp_path / "proposals")
+        engine = ProposalEngine(backlog_manager=backlog, trace_adapter=TraceAdapter())
+
+        engine.run_proposal_scan(str(tmp_path))
+        count_after_first = len(backlog.list_proposals())
+
+        engine.run_proposal_scan(str(tmp_path))
+        count_after_second = len(backlog.list_proposals())
+
+        assert count_after_first == count_after_second
+
+    def test_rescan_preserves_promoted_state(self, tmp_path):
+        """A proposal promoted to CANDIDATE must retain its state after a rescan."""
+        src = tmp_path / "service.py"
+        src.write_text('model_name = "gpt-4-turbo"\n', encoding="utf-8")
+
+        backlog = BacklogManager(tmp_path / "proposals")
+        engine = ProposalEngine(backlog_manager=backlog, trace_adapter=TraceAdapter())
+
+        engine.run_proposal_scan(str(tmp_path))
+        proposal = backlog.list_proposals()[0]
+        backlog.transition_state(proposal.id, ProposalState.CANDIDATE)
+
+        # Rescan – state must be preserved
+        engine.run_proposal_scan(str(tmp_path))
+        updated = backlog.get_proposal(proposal.id)
+        assert updated.state == ProposalState.CANDIDATE
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: Full file-filtering semantics (include_only, fnmatch)
+# ---------------------------------------------------------------------------
+
+class TestProposalEngineFiltering:
+    def _engine(self, tmp_path, filtering):
+        return ProposalEngine(
+            backlog_manager=BacklogManager(tmp_path / "proposals"),
+            trace_adapter=TraceAdapter(),
+            file_filtering=filtering,
+        )
+
+    def test_include_only_respects_include_patterns(self, tmp_path):
+        """include_only mode must only scan files in the included directory."""
+        (tmp_path / "keep").mkdir()
+        (tmp_path / "skip").mkdir()
+        (tmp_path / "keep" / "a.py").write_text('model_name = "gpt-4"\n', encoding="utf-8")
+        (tmp_path / "skip" / "b.py").write_text('model_name = "gpt-4"\n', encoding="utf-8")
+
+        engine = self._engine(
+            tmp_path,
+            {"include_patterns": ["keep"], "exclude_patterns": [], "default_behavior": "include_only"},
+        )
+        proposals = engine.run_proposal_scan(str(tmp_path))
+        sources = {ev["file_path"] for p in proposals for ev in p.evidence}
+        assert sources, "Expected at least one proposal from keep/"
+        assert all("keep" in s for s in sources), f"Unexpected sources: {sources}"
+        assert not any("skip" in s for s in sources)
+
+    def test_include_only_no_include_patterns_scans_nothing(self, tmp_path):
+        """include_only with an empty include list must produce no files."""
+        (tmp_path / "a.py").write_text('model_name = "gpt-4"\n', encoding="utf-8")
+
+        engine = self._engine(
+            tmp_path,
+            {"include_patterns": [], "exclude_patterns": [], "default_behavior": "include_only"},
+        )
+        proposals = engine.run_proposal_scan(str(tmp_path))
+        assert proposals == []
+
+    def test_exclude_only_skips_pattern_matched_files(self, tmp_path):
+        """default_behavior='include_all' must skip exclude_patterns dirs."""
+        (tmp_path / "src").mkdir()
+        (tmp_path / "vendor").mkdir()
+        (tmp_path / "src" / "main.py").write_text('model_name = "gpt-4"\n', encoding="utf-8")
+        (tmp_path / "vendor" / "lib.py").write_text('model_name = "gpt-4"\n', encoding="utf-8")
+
+        engine = self._engine(
+            tmp_path,
+            {"include_patterns": [], "exclude_patterns": ["vendor"], "default_behavior": "include_all"},
+        )
+        proposals = engine.run_proposal_scan(str(tmp_path))
+        sources = {ev["file_path"] for p in proposals for ev in p.evidence}
+        assert not any("vendor" in s for s in sources)
+        assert any("src" in s for s in sources)
+
+    def test_fnmatch_glob_pattern_in_exclude(self, tmp_path):
+        """Glob patterns like '*.min.py' must be honoured in exclude_patterns."""
+        (tmp_path / "app.py").write_text('model_name = "gpt-4"\n', encoding="utf-8")
+        (tmp_path / "app.min.py").write_text('model_name = "gpt-4"\n', encoding="utf-8")
+
+        engine = self._engine(
+            tmp_path,
+            {"include_patterns": [], "exclude_patterns": ["*.min.py"], "default_behavior": "include_all"},
+        )
+        proposals = engine.run_proposal_scan(str(tmp_path))
+        sources = {ev["file_path"] for p in proposals for ev in p.evidence}
+        assert not any("app.min.py" in s for s in sources)
+        assert any("app.py" in s for s in sources)
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: file_filtering callable is re-read on every scan
+# ---------------------------------------------------------------------------
+
+class TestProposalEngineCallableFiltering:
+    def test_callable_filtering_applied_per_scan(self, tmp_path):
+        """Changing a callable's underlying dict is picked up without restart."""
+        (tmp_path / "keep").mkdir()
+        (tmp_path / "skip").mkdir()
+        (tmp_path / "keep" / "a.py").write_text('model_name = "gpt-4"\n', encoding="utf-8")
+        (tmp_path / "skip" / "b.py").write_text('model_name = "gpt-4"\n', encoding="utf-8")
+
+        current = {"include_patterns": [], "exclude_patterns": [], "default_behavior": "include_all"}
+
+        backlog = BacklogManager(tmp_path / "proposals")
+        engine = ProposalEngine(
+            backlog_manager=backlog,
+            trace_adapter=TraceAdapter(),
+            file_filtering=lambda: current,
+        )
+
+        # First scan: all files included → both files trigger proposals
+        p1 = engine.run_proposal_scan(str(tmp_path))
+        sources_1 = {ev["file_path"] for p in p1 for ev in p.evidence}
+        assert any("keep" in s for s in sources_1)
+        assert any("skip" in s for s in sources_1)
+
+        # Mutate the filter in-place – now include_only "keep"
+        current["include_patterns"] = ["keep"]
+        current["default_behavior"] = "include_only"
+
+        p2 = engine.run_proposal_scan(str(tmp_path))
+        sources_2 = {ev["file_path"] for p in p2 for ev in p.evidence}
+        msg = f"skip/ should be excluded after filter update, got: {sources_2}"
+        assert not any("skip" in s for s in sources_2), msg
