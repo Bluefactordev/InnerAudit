@@ -1,4 +1,4 @@
-"""ProposalEngine – orchestrates the scan → detect → persist pipeline."""
+"""ProposalEngine – orchestrates the scan → detect → hypothesis → persist pipeline."""
 
 import fnmatch
 import logging
@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 from .backlog import BacklogManager
 from .detector import BaseDetector, build_detectors
+from .hypothesis import HypothesisBuilder, RawSignal
 from .models import Proposal
 from .trace_adapter import TraceAdapter
 
@@ -59,15 +60,18 @@ def _matches_pattern(file_path: Path, project_path: Path, patterns: List[str]) -
 
 class ProposalEngine:
     """
-    Minimal Proposal Engine for the Software Improvement Pipeline.
+    Proposal Engine for the Software Improvement Pipeline.
 
     Pipeline::
 
         observe (file discovery)
             → detect (static detectors on each file)
-                → propose (build Proposal objects)
-                    → persist (BacklogManager)
-                        → trace (InnerTrace events)
+                → RawSignal (per-detector observation)
+                    → HypothesisBuilder (aggregates signals by rule + file)
+                        → Hypothesis (normalised multi-source evidence)
+                            → Proposal.create() (backlog entry with lifecycle state)
+                                → BacklogManager.save_proposals() (idempotent upsert)
+                                    → TraceAdapter (event emission)
 
     The engine intentionally does **not** auto-fix code.  All proposals
     remain in the ``detected`` state until a human or a stronger model
@@ -224,7 +228,21 @@ class ProposalEngine:
         return filtered
 
     def _scan_file(self, file_path: str, scan_id: str) -> List[Proposal]:
-        """Run all enabled detectors on a single file."""
+        """Run all enabled detectors on a single file using the hypothesis layer.
+
+        Pipeline per file::
+
+            detector.detect() → List[Proposal] (raw hits)
+                → RawSignal extracted from each hit
+                    → HypothesisBuilder aggregates by (rule_id, file_path)
+                        → Hypotheses recorded (available for future validation)
+                            → Original detector proposals collected and returned
+
+        The HypothesisBuilder normalises severity and averages confidence across
+        signals from all detectors.  The proposals returned are the canonical
+        ones built by each detector (preserving their rich title / description /
+        recommendation text).
+        """
         try:
             content = Path(file_path).read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
@@ -232,6 +250,7 @@ class ProposalEngine:
             return []
 
         file_proposals: List[Proposal] = []
+        builder = HypothesisBuilder()
 
         with self.tracer.file_scan_span(file_path):
             for detector in self.detectors:
@@ -251,15 +270,29 @@ class ProposalEngine:
                     continue
 
                 for proposal in hits:
-                    # Emit per-violation trace event (first evidence item)
                     ev = proposal.evidence[0] if proposal.evidence else {}
+
+                    # --- Hypothesis layer ---
+                    # Convert the detector hit into a RawSignal and aggregate.
+                    signal = RawSignal(
+                        rule_id=detector.rule_id,
+                        file_path=file_path,
+                        severity=proposal.severity,
+                        confidence=proposal.confidence,
+                        source_detector=detector.rule_id,
+                        line_number=ev.get("line_number"),
+                        code_snippet=ev.get("code_snippet"),
+                        context=ev.get("context"),
+                    )
+                    builder.add(signal, source_analyzer="static")
+
+                    # --- Trace emission ---
                     self.tracer.emit_violation(
                         rule_id=detector.rule_id,
                         file_path=file_path,
                         severity=proposal.severity,
                         line_number=ev.get("line_number"),
                     )
-                    # Emit per-proposal trace event
                     self.tracer.emit_proposal(
                         proposal_id=proposal.id,
                         proposal_type=proposal.type,
@@ -267,5 +300,15 @@ class ProposalEngine:
                         file_path=file_path,
                     )
                     file_proposals.append(proposal)
+
+        # Log aggregated hypothesis count for observability.
+        hypotheses = builder.build()
+        if hypotheses:
+            logger.debug(
+                "File %s: %d proposal(s) from %d hypothesis/hypotheses.",
+                file_path,
+                len(file_proposals),
+                len(hypotheses),
+            )
 
         return file_proposals

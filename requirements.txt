@@ -1,5 +1,7 @@
 Flask>=3.1
-aider-chat
+# aider-chat is OPTIONAL — AiderAnalyzer is skipped when not installed.
+# To enable Aider-backed deep analysis:
+#   pip install aider-chat
 # InnerTrace is optional – TraceAdapter falls back gracefully when it is absent.
 # To enable full tracing, install manually:
 #   pip install git+https://github.com/Bluefactordev/InnerTrace.git#egg=innertrace
