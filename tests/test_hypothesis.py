@@ -138,7 +138,7 @@ class TestHypothesisBuilder:
         assert hypotheses[0].rule_id == "rule_a"
 
     def test_same_rule_same_file_merges_into_one_hypothesis(self):
-        """Two signals for the same rule + file must merge into one hypothesis."""
+        """Two signals for the same rule + file are merged into one hypothesis."""
         builder = HypothesisBuilder()
         builder.add(_signal(rule_id="rule_a", file_path="f.py", severity="low", confidence=0.5))
         builder.add(_signal(rule_id="rule_a", file_path="f.py", severity="high", confidence=0.9))

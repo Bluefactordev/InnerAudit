@@ -693,14 +693,25 @@ class AuditEngine:
 
         # Fallback: check HTTP reachability of the model endpoint.
         try:
+            import ssl
             import urllib.request
 
+            api_key = model.api_key
+            if api_key.startswith("$"):
+                import os
+                api_key = os.getenv(api_key[1:], "sk-dummy")
+
+            # Use SSL context with certificate verification enabled.
+            ssl_ctx = ssl.create_default_context()
+
             req = urllib.request.Request(
-                model.api_base.rstrip("/") + "/models",
-                headers={"Authorization": f"Bearer {model.api_key}"},
+                model.api_base.rstrip("/"),
+                headers={"Authorization": f"Bearer {api_key}"},
             )
-            with urllib.request.urlopen(req, timeout=10):
+            with urllib.request.urlopen(req, timeout=10, context=ssl_ctx):
                 pass
             return True, f"Endpoint {model.api_base} is reachable."
         except Exception as exc:
-            return False, f"Endpoint check failed: {exc}"
+            # Avoid leaking credentials in the error message.
+            safe_msg = str(exc).replace(model.api_key if model.api_key else "", "***")
+            return False, f"Endpoint check failed: {safe_msg}"

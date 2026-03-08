@@ -77,6 +77,10 @@ def build_analyzers_from_config(
 
     analyzers: List[BaseAnalyzer] = []
     for aid, cfg in analyzers_config.items():
+        # Skip non-dict entries such as "description" metadata keys.
+        if not isinstance(cfg, dict):
+            continue
+
         if not cfg.get("enabled", True):
             logger.debug("Analyzer %r is disabled in config.", aid)
             continue

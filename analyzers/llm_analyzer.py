@@ -47,7 +47,7 @@ class ExternalLLMAnalyzer(BaseAnalyzer):
         if self._model_config is None:
             return False
         try:
-            import openai  # noqa: F401
+            import openai
 
             return True
         except ImportError:

@@ -305,7 +305,7 @@ class ProposalEngine:
         hypotheses = builder.build()
         if hypotheses:
             logger.debug(
-                "File %s: %d proposal(s) from %d hypothesis/hypotheses.",
+                "File %s: %d proposal(s) from %d hypothesis(es).",
                 file_path,
                 len(file_proposals),
                 len(hypotheses),
