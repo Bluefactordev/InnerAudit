@@ -141,8 +141,16 @@ class ConfigManager:
         return self.config.get('file_filtering', {})
     
     def get_aider_config(self) -> Dict[str, Any]:
-        """Get aider configuration"""
+        """Get aider configuration (for backward compatibility)."""
         return self.config.get('aider', {})
+
+    def get_analyzers_config(self) -> Dict[str, Any]:
+        """Get analyzer backends configuration."""
+        return self.config.get('analyzers', {})
+
+    def get_model_roles(self) -> Dict[str, Any]:
+        """Get model role assignments."""
+        return self.config.get('model_roles', {})
     
     def get_output_config(self) -> Dict[str, Any]:
         """Get output configuration"""
@@ -497,80 +505,91 @@ class AuditEngine:
         analysis_types: List[str],
         use_linting: bool = True
     ) -> List[AnalysisResult]:
-        """Run audit on a project"""
+        """Run audit on a project using the configured analyzer backends.
+
+        The active analyzers are resolved from the ``"analyzers"`` section of
+        ``audit_config.json``.  ``StaticAnalyzer`` is always available as a
+        fallback; ``AiderAnalyzer`` and ``ExternalLLMAnalyzer`` are optional and
+        are skipped when unavailable.
+        """
         logger.info(f"Starting audit on {project_path}")
-        
+
         # Discover files
         files = self.discover_files(project_path, platform)
-        
+
         if not files:
             logger.warning("No files found for analysis")
             return []
-        
-        # Initialize Aider
+
+        # Build analyzer list from config.  StaticAnalyzer is always present;
+        # Aider and LLM analyzers are included only when available.
+        analyzers_config = self.config_manager.get_analyzers_config()
         aider_config = self.config_manager.get_aider_config()
-        aider = AiderIntegration(aider_config, model)
-        
+
+        from analyzers import build_analyzers_from_config
+
+        # Merge aider config into analyzers section for backward compatibility:
+        # if the config has an "aider" block at the top level but no "analyzers"
+        # section, honour the top-level block.
+        if not analyzers_config and aider_config.get("enabled"):
+            analyzers_config = {"aider": aider_config}
+
+        active_analyzers = build_analyzers_from_config(
+            analyzers_config,
+            model_config=model,
+        )
+
         # Process files
         all_results = []
-        
+
         for i, file_path in enumerate(files, 1):
             logger.info(f"Processing file {i}/{len(files)}: {file_path}")
 
             linter_results = self._run_linters(file_path, platform) if use_linting else None
-            
+
             for analysis_type_name in analysis_types:
                 analysis_type = platform.analysis_types.get(analysis_type_name)
                 if not analysis_type:
                     continue
-                
+
                 start_time = time.time()
-                
+
                 try:
-                    success, parsed_json, raw_output = aider.run_analysis(
-                        file_path,
-                        analysis_type,
-                        project_path
+                    findings = []
+                    score = None
+                    raw_output = None
+                    success = False
+
+                    for analyzer in active_analyzers:
+                        context = {
+                            "analysis_type": analysis_type,
+                            "project_path": project_path,
+                            "analysis_type_name": analysis_type_name,
+                        }
+                        with open(file_path, "r", encoding="utf-8", errors="replace") as fh:
+                            content = fh.read()
+                        ar = analyzer.analyze_file(file_path, content, context)
+                        if ar.success:
+                            findings.extend(ar.findings)
+                            if ar.score is not None:
+                                score = ar.score
+                            if ar.raw_output:
+                                raw_output = ar.raw_output
+                            success = True
+
+                    result = AnalysisResult(
+                        file_path=file_path,
+                        analysis_type=analysis_type_name,
+                        success=success,
+                        findings=findings,
+                        linter_results=linter_results,
+                        raw_output=raw_output,
+                        execution_time=time.time() - start_time,
+                        score=score
                     )
-                    
-                    if success and parsed_json:
-                        findings = []
-                        score = None
-                        
-                        for key in ['findings', 'vulnerabilities', 'issues', 'performance_issues']:
-                            if key in parsed_json:
-                                findings = parsed_json[key]
-                                break
-                        
-                        for score_key in ['overall_score', 'security_score', 'quality_score', 'performance_score']:
-                            if score_key in parsed_json:
-                                score = parsed_json[score_key]
-                                break
-                        
-                        result = AnalysisResult(
-                            file_path=file_path,
-                            analysis_type=analysis_type_name,
-                            success=True,
-                            findings=findings,
-                            linter_results=linter_results,
-                            raw_output=raw_output,
-                            execution_time=time.time() - start_time,
-                            score=score
-                        )
-                    else:
-                        result = AnalysisResult(
-                            file_path=file_path,
-                            analysis_type=analysis_type_name,
-                            success=False,
-                            findings=[],
-                            linter_results=linter_results,
-                            raw_output=raw_output,
-                            error="Analysis failed",
-                            execution_time=time.time() - start_time
-                        )
-                    
+
                     all_results.append(result)
-                
+
                 except Exception as e:
                     logger.error(f"Error analyzing {file_path}: {e}")
                     result = AnalysisResult(
@@ -583,7 +602,7 @@ class AuditEngine:
                         execution_time=time.time() - start_time
                     )
                     all_results.append(result)
-        
+
         return all_results
     
     def generate_report(
@@ -656,7 +675,43 @@ class AuditEngine:
         return report_file
     
     def test_model_connection(self, model: ModelConfig) -> Tuple[bool, str]:
-        """Test model connection"""
+        """Test connectivity to a model endpoint.
+
+        Tries the AiderAnalyzer when Aider is enabled and available; falls back
+        to a direct HTTP connectivity check via the openai package otherwise.
+        """
+        from analyzers import build_analyzer
+
         aider_config = self.config_manager.get_aider_config()
-        aider = AiderIntegration(aider_config, model)
-        return aider.test_connection()
+
+        if aider_config.get("enabled"):
+            analyzer = build_analyzer("aider", aider_config, model_config=model)
+            if analyzer is not None and analyzer.is_available():
+                # Delegate to AiderIntegration.test_connection
+                aider = AiderIntegration(aider_config, model)
+                return aider.test_connection()
+
+        # Fallback: check HTTP reachability of the model endpoint.
+        try:
+            import ssl
+            import urllib.request
+
+            api_key = model.api_key
+            if api_key.startswith("$"):
+                import os
+                api_key = os.getenv(api_key[1:], "sk-dummy")
+
+            # Use SSL context with certificate verification enabled.
+            ssl_ctx = ssl.create_default_context()
+
+            req = urllib.request.Request(
+                model.api_base.rstrip("/"),
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            with urllib.request.urlopen(req, timeout=10, context=ssl_ctx):
+                pass
+            return True, f"Endpoint {model.api_base} is reachable."
+        except Exception as exc:
+            # Avoid leaking credentials in the error message.
+            safe_msg = str(exc).replace(model.api_key if model.api_key else "", "***")
+            return False, f"Endpoint check failed: {safe_msg}"
