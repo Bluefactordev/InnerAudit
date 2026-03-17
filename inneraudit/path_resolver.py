@@ -103,7 +103,7 @@ def resolve_paths(
 
 
 def _expand_directory(directory: Path, root: Path) -> List[Path]:
-    """Recursively yield all readable files inside *directory*, skipping ignored dirs."""
+    """Return all readable files inside *directory*, skipping ignored dirs."""
     files: list[Path] = []
     try:
         for entry in sorted(directory.rglob("*")):

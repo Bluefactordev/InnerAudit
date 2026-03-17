@@ -153,9 +153,9 @@ class TestImportExtraction:
         assert "utils" in mods
 
     def test_ast_fallback_on_syntax_error(self):
-        broken = "def foo(:\n    pass\n"
+        invalid_syntax = "def foo(:\n    pass\n"
         # Should not raise; falls back to regex
-        result = _extract_imports_ast(broken)
+        result = _extract_imports_ast(invalid_syntax)
         assert isinstance(result, list)
 
     def test_regex_fallback(self):

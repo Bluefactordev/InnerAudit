@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 *.log
 audit_reports/
+audit_checkpoints/
 .env
 .env.*
 !.env.example
