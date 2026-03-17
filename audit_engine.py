@@ -565,13 +565,29 @@ class AuditEngine:
         analysis_types: List[str],
         use_linting: bool = True,
         progress_callback: Optional[Any] = None,
+        precomputed_files: Optional[List[str]] = None,
     ) -> List[AnalysisResult]:
-        """Run audit on a project using configured analyzer backends."""
+        """Run audit on a project using configured analyzer backends.
+
+        Parameters
+        ----------
+        precomputed_files:
+            Optional pre-computed list of file paths to audit.  When
+            provided, file discovery is skipped and these files are used
+            directly.  The existing full-scan behaviour is preserved when
+            this argument is omitted or *None*.
+        """
         logger.info(f"Starting audit on {project_path}")
-        
-        # Discover files
-        files = self.discover_files(project_path, platform)
-        
+
+        # Use precomputed file list when provided; fall back to discovery.
+        if precomputed_files is not None:
+            files = list(precomputed_files)
+            logger.info(
+                "Using precomputed file list: %d file(s).", len(files)
+            )
+        else:
+            files = self.discover_files(project_path, platform)
+
         if not files:
             logger.warning("No files found for analysis")
             return []
