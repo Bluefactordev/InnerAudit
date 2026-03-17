@@ -2,6 +2,7 @@
 
 from .backlog import BacklogManager
 from .engine import ProposalEngine
+from .hypothesis import Hypothesis, HypothesisBuilder, RawSignal
 from .models import ALLOWED_TRANSITIONS, Proposal, ProposalState, make_proposal_id
 from .trace_adapter import TraceAdapter
 
@@ -13,4 +14,7 @@ __all__ = [
     "make_proposal_id",
     "BacklogManager",
     "TraceAdapter",
+    "Hypothesis",
+    "HypothesisBuilder",
+    "RawSignal",
 ]

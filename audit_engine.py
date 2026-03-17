@@ -35,6 +35,14 @@ class ModelConfig:
     max_tokens: int = 4096
     temperature: float = 0.3
     extra_body: Optional[Dict[str, Any]] = None
+    aider_model: Optional[str] = None
+    env_overrides: Optional[Dict[str, str]] = None
+    # Lista di capability del modello lette da models.json (es. ["thinking","vision"]).
+    # Usata per decidere parametri di chiamata — MAI usare il nome del modello.
+    capabilities: Optional[List[str]] = None
+    # Se True, disabilita il thinking mode via chat_template_kwargs.
+    # Va impostato dalla route leggendo models.json, MAI dal nome del modello.
+    disable_thinking: bool = False
 
 
 @dataclass
@@ -143,6 +151,14 @@ class ConfigManager:
     def get_aider_config(self) -> Dict[str, Any]:
         """Get aider configuration"""
         return self.config.get('aider', {})
+
+    def get_analyzers_config(self) -> Dict[str, Any]:
+        """Get analyzer backend configuration."""
+        return self.config.get('analyzers', {})
+
+    def get_model_roles(self) -> Dict[str, Any]:
+        """Get configured conceptual model roles."""
+        return self.config.get('model_roles', {})
     
     def get_output_config(self) -> Dict[str, Any]:
         """Get output configuration"""
@@ -163,6 +179,8 @@ class AiderIntegration:
         self.model_config = model_config
         self.aider_command = config.get('command', 'aider')
         self.aider_args = list(config.get('args', ['--no-git', '--no-auto-commits', '--yes']))
+        if '--no-show-release-notes' not in self.aider_args:
+            self.aider_args.append('--no-show-release-notes')
         self.timeout = config.get('timeout', 300)
         self.max_retries = config.get('max_retries', 2)
         self._build_aider_command()
@@ -187,9 +205,45 @@ class AiderIntegration:
 
     def _build_aider_command(self):
         """Build the Aider command with model and endpoint configuration."""
-        self._append_flag("--model", self.model_config.model_name)
+        model_name = self.model_config.aider_model or self.model_config.model_name
+        self._append_flag("--model", model_name)
         self._append_flag("--openai-api-base", self.model_config.api_base)
         self._append_flag("--openai-api-key", self._resolve_api_key())
+
+    def _build_environment(self) -> Dict[str, str]:
+        """Build subprocess environment for provider-specific overrides.
+        Disables browser popups (aider opens https://aider.chat/docs/llms/warnings.html otherwise).
+        """
+        env = os.environ.copy()
+        env["DISPLAY"] = ""
+        env["BROWSER"] = ""
+        for key, value in (self.model_config.env_overrides or {}).items():
+            if value:
+                env[key] = value
+        return env
+
+    @staticmethod
+    def extract_findings_and_score(
+        parsed_json: Optional[Dict[str, Any]],
+    ) -> Tuple[List[Dict[str, Any]], Optional[int]]:
+        """Normalize supported JSON payloads into findings and score."""
+        if not parsed_json:
+            return [], None
+
+        findings: List[Dict[str, Any]] = []
+        score: Optional[int] = None
+
+        for key in ["findings", "vulnerabilities", "issues", "performance_issues"]:
+            if key in parsed_json:
+                findings = parsed_json[key]
+                break
+
+        for score_key in ["overall_score", "security_score", "quality_score", "performance_score"]:
+            if score_key in parsed_json:
+                score = parsed_json[score_key]
+                break
+
+        return findings, score
     
     def _load_best_practices(self, project_path: str = ".") -> str:
         """Load best practices"""
@@ -236,7 +290,7 @@ Verifica che il codice rispetti queste best practices. Per ogni violazione:
         
         return role_instructions + best_practices_section
     
-    def _extract_json_from_output(self, output: str) -> Optional[Dict[str, Any]]:
+    def extract_json_from_output(self, output: str) -> Optional[Dict[str, Any]]:
         """Extract JSON from output"""
         try:
             json_matches = self.JSON_PATTERN.findall(output)
@@ -261,6 +315,22 @@ Verifica che il codice rispetti queste best practices. Per ogni violazione:
         except Exception as e:
             logger.error(f"Error extracting JSON: {e}")
             return None
+
+    def build_prompt(
+        self,
+        file_path: str,
+        analysis_type: AnalysisType,
+        project_path: str = ".",
+    ) -> str:
+        """Build the full prompt shared by Aider and direct-LLM analyzers."""
+        best_practices = self._load_best_practices(project_path)
+        system_prompt = self._build_system_prompt(analysis_type, best_practices)
+        user_prompt = (
+            analysis_type.prompt_template
+            .replace("{file_path}", file_path)
+            .replace("{context}", "")
+        )
+        return f"{system_prompt}\n\n{user_prompt}"
     
     def run_analysis(
         self,
@@ -269,15 +339,11 @@ Verifica che il codice rispetti queste best practices. Per ogni violazione:
         project_path: str = "."
     ) -> Tuple[bool, Optional[Dict[str, Any]], str]:
         """Run Aider analysis on a file"""
-        best_practices = self._load_best_practices(project_path)
-        system_prompt = self._build_system_prompt(analysis_type, best_practices)
-        
-        user_prompt = analysis_type.prompt_template.format(
+        full_prompt = self.build_prompt(
             file_path=file_path,
-            context=""
+            analysis_type=analysis_type,
+            project_path=project_path,
         )
-        
-        full_prompt = f"{system_prompt}\n\n{user_prompt}"
         
         cmd = [self.aider_command] + self.aider_args + [file_path]
         
@@ -291,11 +357,12 @@ Verifica che il codice rispetti queste best practices. Per ogni violazione:
                     capture_output=True,
                     text=True,
                     timeout=self.timeout,
-                    shell=False
+                    shell=False,
+                    env=self._build_environment(),
                 )
                 
                 raw_output = result.stdout + result.stderr
-                parsed_json = self._extract_json_from_output(raw_output)
+                parsed_json = self.extract_json_from_output(raw_output)
                 
                 if parsed_json:
                     logger.info(f"Successfully analyzed {file_path}")
@@ -342,7 +409,8 @@ Verifica che il codice rispetti queste best practices. Per ogni violazione:
                 input=prompt,
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=30,
+                env=self._build_environment(),
             )
             elapsed = time.time() - start_time
 
@@ -495,9 +563,10 @@ class AuditEngine:
         model: ModelConfig,
         platform: PlatformConfig,
         analysis_types: List[str],
-        use_linting: bool = True
+        use_linting: bool = True,
+        progress_callback: Optional[Any] = None,
     ) -> List[AnalysisResult]:
-        """Run audit on a project"""
+        """Run audit on a project using configured analyzer backends."""
         logger.info(f"Starting audit on {project_path}")
         
         # Discover files
@@ -507,83 +576,196 @@ class AuditEngine:
             logger.warning("No files found for analysis")
             return []
         
-        # Initialize Aider
+        analyzers_config = self.config_manager.get_analyzers_config()
         aider_config = self.config_manager.get_aider_config()
-        aider = AiderIntegration(aider_config, model)
-        
-        # Process files
-        all_results = []
-        
-        for i, file_path in enumerate(files, 1):
-            logger.info(f"Processing file {i}/{len(files)}: {file_path}")
+        if not analyzers_config and aider_config.get("enabled", True):
+            analyzers_config = {"aider": aider_config}
+
+        from analyzers import build_analyzers_from_config
+
+        active_analyzers = build_analyzers_from_config(
+            analyzers_config,
+            inject_static_fallback=False,
+            detector_configs=self.config_manager.config.get("proposal_engine", {}).get("detectors", {}),
+            model_config=model,
+        )
+
+        if not active_analyzers:
+            raise RuntimeError(
+                "No audit analyzers are available. "
+                "Configure an enabled backend or install its runtime dependency."
+            )
+
+        # Semaforo condiviso — limita le chiamate LLM simultanee a MAX_CONCURRENT
+        try:
+            import sys as _sys
+            _ia_dir = str(Path(__file__).resolve().parent)
+            if _ia_dir not in _sys.path:
+                _sys.path.insert(0, _ia_dir)
+            from concurrency import AuditConcurrencyLimiter, MAX_CONCURRENT_LLM_CALLS
+            limiter = AuditConcurrencyLimiter.get_instance()
+            max_workers = MAX_CONCURRENT_LLM_CALLS
+        except Exception:
+            limiter = None
+            max_workers = 4
+
+        # Cartella per salvataggio progressivo dei risultati
+        checkpoint_dir = Path(BASE_DIR) / "audit_checkpoints"
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_file = checkpoint_dir / f"checkpoint_{int(time.time())}.jsonl"
+
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        all_results: List[AnalysisResult] = []
+        results_lock = threading.Lock()
+        total_tasks = len(files) * len(analysis_types)
+        done_counter = [0]  # lista per mutabilità in closure
+
+        def _save_checkpoint(result: AnalysisResult) -> None:
+            """Salva un risultato su disco in modo atomico (append JSONL)."""
+            try:
+                entry = {
+                    "file_path": result.file_path,
+                    "analysis_type": result.analysis_type,
+                    "success": result.success,
+                    "findings": result.findings,
+                    "score": result.score,
+                    "error": result.error,
+                    "execution_time": result.execution_time,
+                }
+                with open(checkpoint_file, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            except Exception as exc:
+                logger.warning("Checkpoint write failed: %s", exc)
+
+        def _analyze_one(file_path: str, analysis_type_name: str) -> AnalysisResult:
+            """Analizza un singolo file/tipo — eseguito in thread pool."""
+            analysis_type = platform.analysis_types.get(analysis_type_name)
+            if not analysis_type:
+                return AnalysisResult(
+                    file_path=file_path,
+                    analysis_type=analysis_type_name,
+                    success=False,
+                    findings=[],
+                    error="analysis_type non trovato nella piattaforma",
+                )
 
             linter_results = self._run_linters(file_path, platform) if use_linting else None
-            
-            for analysis_type_name in analysis_types:
-                analysis_type = platform.analysis_types.get(analysis_type_name)
-                if not analysis_type:
-                    continue
-                
-                start_time = time.time()
-                
-                try:
-                    success, parsed_json, raw_output = aider.run_analysis(
-                        file_path,
-                        analysis_type,
-                        project_path
-                    )
-                    
-                    if success and parsed_json:
-                        findings = []
-                        score = None
-                        
-                        for key in ['findings', 'vulnerabilities', 'issues', 'performance_issues']:
-                            if key in parsed_json:
-                                findings = parsed_json[key]
-                                break
-                        
-                        for score_key in ['overall_score', 'security_score', 'quality_score', 'performance_score']:
-                            if score_key in parsed_json:
-                                score = parsed_json[score_key]
-                                break
-                        
-                        result = AnalysisResult(
-                            file_path=file_path,
-                            analysis_type=analysis_type_name,
-                            success=True,
-                            findings=findings,
-                            linter_results=linter_results,
-                            raw_output=raw_output,
-                            execution_time=time.time() - start_time,
-                            score=score
-                        )
-                    else:
-                        result = AnalysisResult(
-                            file_path=file_path,
-                            analysis_type=analysis_type_name,
-                            success=False,
-                            findings=[],
-                            linter_results=linter_results,
-                            raw_output=raw_output,
-                            error="Analysis failed",
-                            execution_time=time.time() - start_time
-                        )
-                    
-                    all_results.append(result)
-                
-                except Exception as e:
-                    logger.error(f"Error analyzing {file_path}: {e}")
-                    result = AnalysisResult(
+
+            try:
+                with open(file_path, "r", encoding="utf-8", errors="replace") as fh:
+                    content = fh.read()
+            except OSError as e:
+                return AnalysisResult(
+                    file_path=file_path,
+                    analysis_type=analysis_type_name,
+                    success=False,
+                    findings=[],
+                    linter_results=linter_results,
+                    error=str(e),
+                )
+
+            start_time = time.time()
+            findings: List[Dict[str, Any]] = []
+            raw_outputs: List[str] = []
+            score: Optional[int] = None
+            success = False
+            errors: List[str] = []
+
+            def _run():
+                nonlocal success, score
+                for analyzer in active_analyzers:
+                    ar = analyzer.analyze_file(
                         file_path=file_path,
-                        analysis_type=analysis_type_name,
+                        content=content,
+                        context={
+                            "analysis_type": analysis_type,
+                            "analysis_type_name": analysis_type_name,
+                            "project_path": project_path,
+                        },
+                    )
+                    if ar.success:
+                        success = True
+                        findings.extend(ar.findings)
+                        if ar.raw_output:
+                            raw_outputs.append(ar.raw_output)
+                        if ar.score is not None:
+                            score = ar.score
+                    elif ar.error:
+                        errors.append(f"{analyzer.analyzer_id}: {ar.error}")
+
+            try:
+                if limiter:
+                    with limiter.acquire():
+                        _run()
+                else:
+                    _run()
+            except Exception as e:
+                logger.error("Error analyzing %s [%s]: %s", file_path, analysis_type_name, e)
+                errors.append(str(e))
+
+            return AnalysisResult(
+                file_path=file_path,
+                analysis_type=analysis_type_name,
+                success=success,
+                findings=findings,
+                linter_results=linter_results,
+                raw_output="\n\n".join(raw_outputs) if raw_outputs else None,
+                error=None if success else ("; ".join(errors) or "Analysis failed"),
+                execution_time=time.time() - start_time,
+                score=score,
+            )
+
+        # Costruisce lista di task (file × analysis_type)
+        tasks = [
+            (fp, at)
+            for fp in files
+            for at in analysis_types
+        ]
+
+        logger.info(
+            "Avvio audit parallelo: %d task, %d worker, checkpoint=%s",
+            len(tasks), max_workers, checkpoint_file.name,
+        )
+
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="inneraudit") as pool:
+            future_to_task = {
+                pool.submit(_analyze_one, fp, at): (fp, at)
+                for fp, at in tasks
+            }
+            for future in as_completed(future_to_task):
+                fp, at = future_to_task[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    logger.error("Future exception %s [%s]: %s", fp, at, exc)
+                    result = AnalysisResult(
+                        file_path=fp,
+                        analysis_type=at,
                         success=False,
                         findings=[],
-                        linter_results=linter_results,
-                        error=str(e),
-                        execution_time=time.time() - start_time
+                        error=str(exc),
                     )
+
+                with results_lock:
                     all_results.append(result)
-        
+                    done_counter[0] += 1
+                    done_now = done_counter[0]
+
+                # Salvataggio progressivo su disco
+                _save_checkpoint(result)
+
+                if progress_callback:
+                    try:
+                        progress_callback(done_now, total_tasks, fp)
+                    except Exception:
+                        pass
+
+        logger.info(
+            "Audit completato: %d/%d task, checkpoint=%s",
+            done_counter[0], total_tasks, checkpoint_file.name,
+        )
         return all_results
     
     def generate_report(
@@ -656,7 +838,40 @@ class AuditEngine:
         return report_file
     
     def test_model_connection(self, model: ModelConfig) -> Tuple[bool, str]:
-        """Test model connection"""
+        """Test configured model connectivity."""
         aider_config = self.config_manager.get_aider_config()
-        aider = AiderIntegration(aider_config, model)
-        return aider.test_connection()
+        if aider_config.get("enabled", True):
+            from analyzers import build_analyzer
+
+            analyzer = build_analyzer("aider", aider_config, model_config=model)
+            if analyzer is not None and analyzer.is_available():
+                aider = AiderIntegration(aider_config, model)
+                return aider.test_connection()
+
+        try:
+            import ssl
+            import urllib.request
+
+            api_key = model.api_key
+            if api_key.startswith("$"):
+                api_key = os.getenv(api_key[1:], "sk-dummy")
+
+            if not model.api_base:
+                return True, f"Model {model.id} selected with provider-managed endpoint."
+
+            request = urllib.request.Request(
+                model.api_base.rstrip("/"),
+                headers={"Authorization": f"Bearer {api_key or 'sk-dummy'}"},
+            )
+            with urllib.request.urlopen(
+                request,
+                timeout=10,
+                context=ssl.create_default_context(),
+            ):
+                pass
+            return True, f"Endpoint {model.api_base} is reachable."
+        except Exception as exc:
+            safe_message = str(exc)
+            if model.api_key:
+                safe_message = safe_message.replace(model.api_key, "***")
+            return False, f"Endpoint check failed: {safe_message}"

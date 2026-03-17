@@ -14,21 +14,21 @@ This file contains the list of best practices that the AI auditor model should c
 - Avoid hardcoding specific llms name: if you the code must take into account a specific model behaviour you need to abstract it in a parmeter to configure in models.json that can be shared in the future buy other llms
 
 ### 2. Configuration Management
-- **NO hardcoded parameters in code** - All constant values should be in settings files
+- **NO hardcoded parameters in code** - All constant values should be in settings files [FORSE DOVREMMO SCRIVERE QUALI]
 - Use environment variables for environment-specific configuration
 - Configuration should be loaded at startup, not scattered throughout the code
 
 ### 3. System Prompts
-- System prompts should be minimal and role-based
-- Avoid embedding project-specific or task-specific knowledge in system prompts
-- Use external files (like GUIDELINES.md) for project-specific context
-- System prompts should be in english language where possible
+- System prompts should be minimal [PERICOLOSO, TUTTI GLI ASSISTENTI HANNO IL PROMPT IN SYSTEM PROMPT, NON VORREI CHE ME LI SEGNALASSE DI CONTINUO] and role-based
+- Avoid embedding project-specific or task-specific knowledge in system prompts[RIFLETTIAMO ANCHE SU QUESTO]
+- Use external files (like GUIDELINES.md) for project-specific context [RIFLETTIAMO ANCHE SU QUESTO]
+- System prompts should be in english language where possible [SE POI IL PROMPT FINALE HA PIU PARTI INGLESI CHE NELLA LINGUA DELLA RICHIESTA DELL'UTENTE NON RISCHIAMO CHE IL SISTEMA RISPONDA IN INGLESE?]
 
 ### 4. Error Handling
 - Use proper exception handling with specific exception types
 - Never silently swallow exceptions
-- Log errors with sufficient context for debugging
-- Implement graceful degradation when dependencies fail
+- Log errors with sufficient context for debugging [QUI IL MIO SOGNO E' CHE OGNI ISTRUZIONE DI LOG ABBIA DUE PARAMETRI: DOMINIO E LIVELLO, IN MODO DA POTER POI SCEGLIERE COME GENERARE E/O FILTRARE IN MODO AUTOMATICO IL LOG]
+- Implement graceful degradation when dependencies fail [SPIEGAMI]
 
 ### 5. Security Best Practices
 - Sensitive values (API keys, passwords) should NEVER be in code, but pnly in file .env

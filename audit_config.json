@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "description": "Configuration file for the Audit Manager system - Aider-Centric",
+  "description": "Configuration file for InnerAudit audit and proposal pipelines",
   "default_model": "qwen3-30b-thinking",
   "platforms": {
     "python": {
@@ -203,6 +203,26 @@
     "timeout": 300,
     "max_retries": 2,
     "continue_on_error": true
+  },
+  "analyzers": {
+    "description": "Audit backends. Direct LLM calls only — no Aider subprocess.",
+    "aider": {
+      "enabled": false,
+      "command": "aider",
+      "args": ["--no-git", "--no-auto-commits", "--yes"],
+      "timeout": 300,
+      "max_retries": 2,
+      "continue_on_error": true
+    },
+    "llm": {
+      "enabled": true,
+      "model_role": "scanner_model",
+      "timeout": 300,
+      "max_retries": 2
+    },
+    "static": {
+      "enabled": false
+    }
   },
   "output": {
     "report_dir": "audit_reports",

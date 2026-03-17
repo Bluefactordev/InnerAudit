@@ -1,4 +1,4 @@
-"""ProposalEngine – orchestrates the scan → detect → persist pipeline."""
+"""ProposalEngine – orchestrates the scan → detect → hypothesis → persist pipeline."""
 
 import fnmatch
 import logging
@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 from .backlog import BacklogManager
 from .detector import BaseDetector, build_detectors
+from .hypothesis import HypothesisBuilder, RawSignal
 from .models import Proposal
 from .trace_adapter import TraceAdapter
 
@@ -59,15 +60,17 @@ def _matches_pattern(file_path: Path, project_path: Path, patterns: List[str]) -
 
 class ProposalEngine:
     """
-    Minimal Proposal Engine for the Software Improvement Pipeline.
+    Proposal Engine for the Software Improvement Pipeline.
 
     Pipeline::
 
         observe (file discovery)
             → detect (static detectors on each file)
-                → propose (build Proposal objects)
-                    → persist (BacklogManager)
-                        → trace (InnerTrace events)
+                → RawSignal (per-detector observation)
+                    → HypothesisBuilder (aggregates by rule + file)
+                        → propose (build Proposal objects)
+                            → persist (BacklogManager)
+                                → trace (InnerTrace events)
 
     The engine intentionally does **not** auto-fix code.  All proposals
     remain in the ``detected`` state until a human or a stronger model
@@ -232,6 +235,7 @@ class ProposalEngine:
             return []
 
         file_proposals: List[Proposal] = []
+        builder = HypothesisBuilder()
 
         with self.tracer.file_scan_span(file_path):
             for detector in self.detectors:
@@ -251,15 +255,26 @@ class ProposalEngine:
                     continue
 
                 for proposal in hits:
-                    # Emit per-violation trace event (first evidence item)
                     ev = proposal.evidence[0] if proposal.evidence else {}
+                    builder.add(
+                        RawSignal(
+                            rule_id=detector.rule_id,
+                            file_path=file_path,
+                            severity=proposal.severity,
+                            confidence=proposal.confidence,
+                            source_detector=detector.rule_id,
+                            line_number=ev.get("line_number"),
+                            code_snippet=ev.get("code_snippet"),
+                            context=ev.get("context"),
+                        ),
+                        source_analyzer="static",
+                    )
                     self.tracer.emit_violation(
                         rule_id=detector.rule_id,
                         file_path=file_path,
                         severity=proposal.severity,
                         line_number=ev.get("line_number"),
                     )
-                    # Emit per-proposal trace event
                     self.tracer.emit_proposal(
                         proposal_id=proposal.id,
                         proposal_type=proposal.type,
@@ -267,5 +282,14 @@ class ProposalEngine:
                         file_path=file_path,
                     )
                     file_proposals.append(proposal)
+
+        hypotheses = builder.build()
+        if hypotheses:
+            logger.debug(
+                "File %s produced %d proposals from %d hypotheses.",
+                file_path,
+                len(file_proposals),
+                len(hypotheses),
+            )
 
         return file_proposals
