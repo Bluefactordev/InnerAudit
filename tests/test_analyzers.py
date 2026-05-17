@@ -1,16 +1,22 @@
 """Tests for analyzer backends and audit backend selection."""
 
 import json
+import os
 import sys
 from pathlib import Path
 
 import pytest
 
+os.environ.setdefault("FLASK_SECRET_KEY", "test")
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from analyzers import StaticAnalyzer, build_analyzer, build_analyzers_from_config
 from analyzers.aider_analyzer import AiderAnalyzer
+from analyzers.llm_analyzer import ExternalLLMAnalyzer
 from audit_engine import ConfigManager, AuditEngine
+from audit_engine import ModelConfig
 
 
 def _write_config(tmp_path: Path, mutate):
@@ -62,6 +68,69 @@ class TestAnalyzerRegistry:
     def test_can_disable_implicit_fallback(self):
         analyzers = build_analyzers_from_config({}, inject_static_fallback=False)
         assert analyzers == []
+
+
+class TestExternalLLMAnalyzerNirodeepRuntime:
+    def test_uses_model_provider_runtime_when_configured(self, monkeypatch):
+        captured = {}
+
+        async def _fake_generate_job(**kwargs):
+            captured.update(kwargs)
+            return {"result": '{"findings":[{"severity":"high","category":"logic","description":"x","recommendation":"y"}],"overall_score":77}'}
+
+        monkeypatch.setattr(
+            "utils.models.ModelProvider.generate_job",
+            _fake_generate_job,
+            raising=False,
+        )
+
+        analyzer = ExternalLLMAnalyzer(
+            config={"enabled": True},
+            model_config=ModelConfig(
+                id="runtime-model",
+                name="Runtime Model",
+                type="vllm",
+                api_base="",
+                model_name="vllm/runtime-model",
+                api_key="",
+                runtime_options={
+                    "adapter": "nirodeep",
+                    "context": {
+                        "project_id": "proj-1",
+                        "user_id": "user-1",
+                        "is_superuser": True,
+                    },
+                    "tool_names": ["filesystem_tree_from_dataset"],
+                    "execution_mode": "agentic",
+                    "depth": 0,
+                    "agentic_max_iterations": 4,
+                },
+            ),
+        )
+
+        analysis_type = type(
+            "AnalysisTypeStub",
+            (),
+            {"prompt_template": "Analizza {file_path}. Contesto: {context}"},
+        )()
+
+        result = analyzer.analyze_file(
+            "services/app.py",
+            "print('hello')\n",
+            context={
+                "analysis_type": analysis_type,
+                "project_path": ".",
+            },
+        )
+
+        assert analyzer.is_available() is True
+        assert result.success is True
+        assert result.score == 77
+        assert result.findings[0]["severity"] == "high"
+        assert captured["model_id"] == "vllm/runtime-model"
+        assert captured["tools"] == ["filesystem_tree_from_dataset"]
+        assert captured["context"]["execution_mode"] == "agentic"
+        assert captured["context"]["is_superuser"] is True
 
 
 class TestAuditEngineBackendSelection:

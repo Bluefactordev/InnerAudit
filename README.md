@@ -1,12 +1,13 @@
 # InnerAudit
 
-InnerAudit e un micro-servizio Flask per audit di codice assistito da AI. Scansiona un progetto, applica filtri ai file, lancia un pre-flight linting opzionale e delega l'analisi semantica ad Aider, salvando report JSON consultabili da interfaccia web.
+InnerAudit e un micro-servizio Flask per audit di codice assistito da AI. Scansiona un progetto, applica filtri ai file, lancia un pre-flight linting opzionale e delega l'analisi semantica a un analyzer LLM o ad Aider, salvando report JSON consultabili da interfaccia web.
 
 ## Stato attuale
 
 - Funziona come tool standalone dentro `external/inneraudit`
 - Usa configurazione locale, non quella del monorepo
 - Supporta modelli OpenAI-compatible locali o cloud tramite `api_base` e `api_key`
+- Nell'integrazione BF puo usare il runtime Nirodeep canonico invece di chiamare direttamente il server modello raw
 - Salva output in `audit_reports/` e log in `inneraudit.log`
 
 ## Funzionalita principali
@@ -69,6 +70,21 @@ Nel config:
 ```
 
 InnerAudit passa `model`, `openai-api-base` e `openai-api-key` ad Aider al momento dell'esecuzione.
+
+### 1.b Integrazione BF/Nirodeep
+
+Quando InnerAudit viene eseguito dal backend BF:
+
+- i modelli BF possono essere risolti nel runtime Nirodeep canonico
+- l'analyzer LLM non deve bypassare il runtime chiamando il server vLLM raw
+- se il repo corrente e montato nel dataset tramite `repo_sources`, il modello puo sfogliare altri file usando i tool dataset canonici
+
+I tool usati per il browse cross-file sono quelli gia esistenti nel runtime BF:
+
+- `filesystem_tree_from_dataset`
+- `read_full_content_from_dataset`
+
+L'accesso ai file montati passa attraverso `ProjectDatasetFS`.
 
 ### 2. Best practices
 

@@ -43,6 +43,8 @@ class ModelConfig:
     # Se True, disabilita il thinking mode via chat_template_kwargs.
     # Va impostato dalla route leggendo models.json, MAI dal nome del modello.
     disable_thinking: bool = False
+    # Runtime-only options for integrated BF/Nirodeep execution.
+    runtime_options: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -522,15 +524,45 @@ class AuditEngine:
 
         return results
     
-    def discover_files(self, project_path: str, platform: PlatformConfig) -> List[str]:
-        """Discover files to analyze"""
-        project_path = Path(project_path)
+    def discover_files(
+        self,
+        project_path: str,
+        platform: PlatformConfig,
+        include_paths: Optional[List[str]] = None,
+    ) -> List[str]:
+        """Discover files to analyze, optionally restricted to selected files/directories."""
+        project_path = Path(project_path).resolve()
 
         files = set()
-        for ext in platform.file_extensions:
-            for file_path in project_path.rglob(f"*{ext}"):
-                if file_path.is_file():
-                    files.add(file_path.resolve())
+        extensions = set(platform.file_extensions)
+
+        if include_paths:
+            for raw_path in include_paths:
+                rel_path = str(raw_path or "").strip().lstrip("/")
+                if not rel_path:
+                    continue
+                candidate = (project_path / rel_path).resolve()
+                try:
+                    if not candidate.is_relative_to(project_path):
+                        continue
+                except (RuntimeError, OSError):
+                    continue
+
+                if candidate.is_file():
+                    if candidate.suffix in extensions:
+                        files.add(candidate)
+                    continue
+
+                if candidate.is_dir():
+                    for ext in extensions:
+                        for file_path in candidate.rglob(f"*{ext}"):
+                            if file_path.is_file():
+                                files.add(file_path.resolve())
+        else:
+            for ext in platform.file_extensions:
+                for file_path in project_path.rglob(f"*{ext}"):
+                    if file_path.is_file():
+                        files.add(file_path.resolve())
 
         file_filtering = self.config_manager.get_file_filtering()
         include_patterns = file_filtering.get('include_patterns', [])
@@ -551,9 +583,10 @@ class AuditEngine:
                 filtered_files.append(str(file_path))
 
         logger.info(
-            "Discovered %s files for analysis (filtering mode: %s)",
+            "Discovered %s files for analysis (filtering mode: %s, include_paths=%s)",
             len(filtered_files),
             default_behavior,
+            len(include_paths or []),
         )
         return filtered_files
     
@@ -565,12 +598,14 @@ class AuditEngine:
         analysis_types: List[str],
         use_linting: bool = True,
         progress_callback: Optional[Any] = None,
+        include_paths: Optional[List[str]] = None,
+        checkpoint_file: Optional[str] = None,
     ) -> List[AnalysisResult]:
         """Run audit on a project using configured analyzer backends."""
         logger.info(f"Starting audit on {project_path}")
         
         # Discover files
-        files = self.discover_files(project_path, platform)
+        files = self.discover_files(project_path, platform, include_paths=include_paths)
         
         if not files:
             logger.warning("No files found for analysis")
@@ -612,15 +647,55 @@ class AuditEngine:
         # Cartella per salvataggio progressivo dei risultati
         checkpoint_dir = Path(BASE_DIR) / "audit_checkpoints"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        checkpoint_file = checkpoint_dir / f"checkpoint_{int(time.time())}.jsonl"
+        checkpoint_path = Path(checkpoint_file).resolve() if checkpoint_file else checkpoint_dir / f"checkpoint_{int(time.time())}.jsonl"
 
         import threading
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         all_results: List[AnalysisResult] = []
+        completed_tasks: set[Tuple[str, str]] = set()
         results_lock = threading.Lock()
         total_tasks = len(files) * len(analysis_types)
         done_counter = [0]  # lista per mutabilità in closure
+
+        if checkpoint_path.exists():
+            try:
+                with open(checkpoint_path, "r", encoding="utf-8") as handle:
+                    for raw_line in handle:
+                        line = raw_line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        file_path = str(entry.get("file_path") or "")
+                        analysis_type_name = str(entry.get("analysis_type") or "")
+                        if not file_path or not analysis_type_name:
+                            continue
+                        if (file_path, analysis_type_name) in completed_tasks:
+                            continue
+                        completed_tasks.add((file_path, analysis_type_name))
+                        all_results.append(
+                            AnalysisResult(
+                                file_path=file_path,
+                                analysis_type=analysis_type_name,
+                                success=bool(entry.get("success")),
+                                findings=list(entry.get("findings") or []),
+                                raw_output=entry.get("raw_output"),
+                                error=entry.get("error"),
+                                execution_time=float(entry.get("execution_time") or 0.0),
+                                score=entry.get("score"),
+                            )
+                        )
+                done_counter[0] = len(completed_tasks)
+                logger.info(
+                    "Ripresa audit da checkpoint %s: %d task gia completati",
+                    checkpoint_path.name,
+                    done_counter[0],
+                )
+            except Exception as exc:
+                logger.warning("Checkpoint restore failed (%s): %s", checkpoint_path, exc)
 
         def _save_checkpoint(result: AnalysisResult) -> None:
             """Salva un risultato su disco in modo atomico (append JSONL)."""
@@ -634,7 +709,7 @@ class AuditEngine:
                     "error": result.error,
                     "execution_time": result.execution_time,
                 }
-                with open(checkpoint_file, "a", encoding="utf-8") as f:
+                with open(checkpoint_path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(entry, ensure_ascii=False) + "\n")
             except Exception as exc:
                 logger.warning("Checkpoint write failed: %s", exc)
@@ -722,12 +797,19 @@ class AuditEngine:
             (fp, at)
             for fp in files
             for at in analysis_types
+            if (fp, at) not in completed_tasks
         ]
 
         logger.info(
             "Avvio audit parallelo: %d task, %d worker, checkpoint=%s",
-            len(tasks), max_workers, checkpoint_file.name,
+            len(tasks), max_workers, checkpoint_path.name,
         )
+
+        if progress_callback:
+            try:
+                progress_callback(done_counter[0], total_tasks, "")
+            except Exception:
+                pass
 
         with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="inneraudit") as pool:
             future_to_task = {
@@ -764,7 +846,7 @@ class AuditEngine:
 
         logger.info(
             "Audit completato: %d/%d task, checkpoint=%s",
-            done_counter[0], total_tasks, checkpoint_file.name,
+            done_counter[0], total_tasks, checkpoint_path.name,
         )
         return all_results
     
