@@ -165,7 +165,7 @@ class ExternalLLMAnalyzer(BaseAnalyzer):
 
         async def _invoke_runtime() -> Any:
             return await asyncio.wait_for(
-                ModelProvider.generate_job(
+                ModelProvider.generate_for_top_level_run(
                     model_id=self._model_name(),
                     messages=messages,
                     tools=tool_names or None,

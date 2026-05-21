@@ -98,13 +98,13 @@ class TestExternalLLMAnalyzerNirodeepRuntime:
     def test_uses_model_provider_runtime_when_configured(self, monkeypatch):
         captured = {}
 
-        async def _fake_generate_job(**kwargs):
+        async def _fake_generate_for_top_level_run(**kwargs):
             captured.update(kwargs)
             return {"result": '{"findings":[{"severity":"high","category":"logic","description":"x","recommendation":"y"}],"overall_score":77}'}
 
         monkeypatch.setattr(
-            "utils.models.ModelProvider.generate_job",
-            _fake_generate_job,
+            "utils.models.ModelProvider.generate_for_top_level_run",
+            _fake_generate_for_top_level_run,
             raising=False,
         )
 
