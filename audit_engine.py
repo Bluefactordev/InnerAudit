@@ -11,11 +11,18 @@ import time
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Tuple
 
 BASE_DIR = Path(__file__).resolve().parent
 logger = logging.getLogger("AuditEngine")
+DEFAULT_SUBSYSTEM_CONTEXT_MAX_TOTAL_CHARS = 150_000
+DEFAULT_SUBSYSTEM_CONTEXT_MAX_FILE_CHARS = 16_000
+DEFAULT_SUBSYSTEM_CONTEXT_MAX_FILES = 18
+DEFAULT_CONTEXT_MODE = "single_file"
+SUBSYSTEM_CONTEXT_MODE = "subsystem"
+CUSTOM_PROMPT_ANALYSIS_TYPE_KEY = "custom_prompt"
+CUSTOM_PROMPT_ANALYSIS_TYPE_NAME = "Custom audit prompt"
 
 
 # ============================================================================
@@ -323,6 +330,7 @@ Verifica che il codice rispetti queste best practices. Per ogni violazione:
         file_path: str,
         analysis_type: AnalysisType,
         project_path: str = ".",
+        analysis_context: str = "",
     ) -> str:
         """Build the full prompt shared by Aider and direct-LLM analyzers."""
         best_practices = self._load_best_practices(project_path)
@@ -330,7 +338,7 @@ Verifica che il codice rispetti queste best practices. Per ogni violazione:
         user_prompt = (
             analysis_type.prompt_template
             .replace("{file_path}", file_path)
-            .replace("{context}", "")
+            .replace("{context}", str(analysis_context or "").strip())
         )
         return f"{system_prompt}\n\n{user_prompt}"
     
@@ -338,13 +346,15 @@ Verifica che il codice rispetti queste best practices. Per ogni violazione:
         self,
         file_path: str,
         analysis_type: AnalysisType,
-        project_path: str = "."
+        project_path: str = ".",
+        analysis_context: str = "",
     ) -> Tuple[bool, Optional[Dict[str, Any]], str]:
         """Run Aider analysis on a file"""
         full_prompt = self.build_prompt(
             file_path=file_path,
             analysis_type=analysis_type,
             project_path=project_path,
+            analysis_context=analysis_context,
         )
         
         cmd = [self.aider_command] + self.aider_args + [file_path]
@@ -437,6 +447,242 @@ Verifica che il codice rispetti queste best practices. Per ogni violazione:
 # ============================================================================
 # Audit Engine
 # ============================================================================
+
+
+def _normalize_context_mode(raw_value: Any) -> str:
+    candidate = str(raw_value or "").strip().lower()
+    if candidate in {DEFAULT_CONTEXT_MODE, "file"}:
+        return DEFAULT_CONTEXT_MODE
+    if candidate == SUBSYSTEM_CONTEXT_MODE:
+        return SUBSYSTEM_CONTEXT_MODE
+    return DEFAULT_CONTEXT_MODE
+
+
+def _normalize_custom_audit_prompt(raw_value: Any) -> str:
+    return str(raw_value or "").strip()
+
+
+def _normalize_scope_roots(include_paths: Optional[List[str]]) -> List[PurePosixPath]:
+    roots: List[PurePosixPath] = []
+    seen = set()
+    for raw_path in include_paths or []:
+        normalized = "/".join(
+            part for part in str(raw_path or "").replace("\\", "/").split("/") if part not in {"", "."}
+        )
+        if not normalized:
+            continue
+        candidate = PurePosixPath(normalized)
+        if candidate.suffix:
+            candidate = candidate.parent
+        key = candidate.as_posix()
+        if key in {"", "."} or key in seen:
+            continue
+        seen.add(key)
+        roots.append(candidate)
+    return roots
+
+
+def _relative_path_for(project_root: Path, absolute_path: str) -> PurePosixPath:
+    return PurePosixPath(Path(absolute_path).resolve().relative_to(project_root).as_posix())
+
+
+def _build_custom_prompt_template(custom_audit_prompt: str) -> str:
+    return (
+        f"{custom_audit_prompt}\n\n"
+        "Analizza `{file_path}` usando, quando utile, il contesto aggiuntivo seguente: {context}.\n"
+        "Rispondi SOLO in JSON valido con questa struttura: "
+        "{\"findings\": [{\"severity\": \"critical|high|medium|low\", "
+        "\"category\": \"security|logic|performance|best_practice|custom\", "
+        "\"description\": \"descrizione del problema o osservazione\", "
+        "\"line_number\": numero_riga_opzionale, "
+        "\"code_snippet\": \"snippet_opzionale\", "
+        "\"recommendation\": \"raccomandazione o fix suggerito\"}], "
+        "\"summary\": \"riepilogo sintetico\", "
+        "\"overall_score\": 0-100}."
+    )
+
+
+def _build_runtime_analysis_types(
+    platform: PlatformConfig,
+    custom_audit_prompt: str = "",
+) -> Dict[str, AnalysisType]:
+    runtime_analysis_types = dict(platform.analysis_types)
+    normalized_prompt = _normalize_custom_audit_prompt(custom_audit_prompt)
+    if normalized_prompt:
+        runtime_analysis_types[CUSTOM_PROMPT_ANALYSIS_TYPE_KEY] = AnalysisType(
+            name=CUSTOM_PROMPT_ANALYSIS_TYPE_NAME,
+            scope=["file", SUBSYSTEM_CONTEXT_MODE],
+            prompt_template=_build_custom_prompt_template(normalized_prompt),
+        )
+    return runtime_analysis_types
+
+
+def _normalize_subsystem_context_options(raw_options: Optional[Dict[str, Any]]) -> Dict[str, int]:
+    defaults = {
+        "max_total_chars": DEFAULT_SUBSYSTEM_CONTEXT_MAX_TOTAL_CHARS,
+        "max_file_chars": DEFAULT_SUBSYSTEM_CONTEXT_MAX_FILE_CHARS,
+        "max_files": DEFAULT_SUBSYSTEM_CONTEXT_MAX_FILES,
+    }
+    if not isinstance(raw_options, dict):
+        return defaults
+
+    normalized = dict(defaults)
+    for key in defaults:
+        raw_value = raw_options.get(key)
+        try:
+            coerced = int(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if coerced > 0:
+            normalized[key] = coerced
+    return normalized
+
+
+def _format_path_list(paths: List[str], limit: int = 8) -> str:
+    if not paths:
+        return ""
+    visible = paths[:limit]
+    suffix = ""
+    if len(paths) > limit:
+        suffix = f", ... (+{len(paths) - limit} altri)"
+    return ", ".join(visible) + suffix
+
+
+def _build_subsystem_context(
+    *,
+    project_root: Path,
+    files: List[str],
+    include_paths: Optional[List[str]] = None,
+    subsystem_context_options: Optional[Dict[str, Any]] = None,
+) -> str:
+    options = _normalize_subsystem_context_options(subsystem_context_options)
+    max_total_chars = options["max_total_chars"]
+    max_file_chars = options["max_file_chars"]
+    max_files = options["max_files"]
+
+    scoped_roots = [root.as_posix() for root in _normalize_scope_roots(include_paths)]
+    scope_description = (
+        ", ".join(scoped_roots)
+        if scoped_roots
+        else "intero progetto filtrato (nessuno scope esplicito selezionato)"
+    )
+
+    normalized_files: List[Tuple[str, str]] = []
+    for file_path in files:
+        try:
+            rel_path = _relative_path_for(project_root, file_path).as_posix()
+        except Exception:
+            continue
+        normalized_files.append((file_path, rel_path))
+
+    normalized_files.sort(key=lambda item: item[1])
+    if not normalized_files:
+        return ""
+
+    header = "\n".join(
+        [
+            "## Subsystem context",
+            f"Scope selezionato: {scope_description}",
+            f"File totali nello scope filtrato: {len(normalized_files)}",
+            "Questo contesto e condiviso da tutte le analisi file-level in modalita subsystem.",
+        ]
+    )
+
+    manifest_budget = max(2_000, min(max_total_chars // 3, 40_000))
+    manifest_lines: List[str] = []
+    manifest_chars = 0
+    manifest_omitted = 0
+    for _, rel_path in normalized_files:
+        line = f"- {rel_path}"
+        projected = manifest_chars + len(line) + 1
+        if projected > manifest_budget:
+            manifest_omitted += 1
+            continue
+        manifest_lines.append(line)
+        manifest_chars = projected
+    if manifest_omitted:
+        manifest_lines.append(
+            f"[... manifest troncato: {manifest_omitted} file aggiuntivi non elencati ...]"
+        )
+    manifest_section = "## Included files manifest\n" + "\n".join(manifest_lines)
+
+    candidate_sections: List[Tuple[str, str]] = []
+    truncated_files: List[str] = []
+    unreadable_files: List[str] = []
+    for absolute_path, rel_path in normalized_files:
+        try:
+            content = Path(absolute_path).read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            unreadable_files.append(f"{rel_path} ({exc.__class__.__name__})")
+            continue
+
+        if len(content) > max_file_chars:
+            content = (
+                content[:max_file_chars]
+                + f"\n\n[... excerpt troncato a {max_file_chars} caratteri ...]"
+            )
+            truncated_files.append(rel_path)
+
+        candidate_sections.append(
+            (
+                rel_path,
+                f"### {rel_path}\n```text\n{content}\n```",
+            )
+        )
+
+    selected_sections: List[str] = []
+    omitted_due_to_budget = 0
+    base_chars = len(header) + len(manifest_section) + len("## File excerpts\n")
+    reserve_for_notes = max(300, min(1_200, max_total_chars // 5))
+    current_chars = base_chars
+
+    for rel_path, section in candidate_sections:
+        if len(selected_sections) >= max_files:
+            omitted_due_to_budget += 1
+            continue
+        projected = current_chars + len(section) + 2
+        if projected + reserve_for_notes > max_total_chars:
+            omitted_due_to_budget += 1
+            continue
+        selected_sections.append(section)
+        current_chars = projected
+
+    def _build_notes_section(omitted_count: int) -> str:
+        note_lines = [
+            f"- Estratti inclusi: {len(selected_sections)}/{len(candidate_sections)}",
+        ]
+        if truncated_files:
+            note_lines.append(
+                f"- File troncati per excerpt: {_format_path_list(truncated_files)}"
+            )
+        if omitted_count:
+            note_lines.append(
+                f"- File omessi per budget totale o limite estratti: {omitted_count}"
+            )
+        if unreadable_files:
+            note_lines.append(
+                f"- File saltati per lettura non riuscita: {_format_path_list(unreadable_files)}"
+            )
+        return "## Context budget notes\n" + "\n".join(note_lines)
+
+    while True:
+        notes_section = _build_notes_section(omitted_due_to_budget)
+        parts = [header, manifest_section, notes_section]
+        if selected_sections:
+            parts.append("## File excerpts")
+            parts.extend(selected_sections)
+        else:
+            parts.append("## File excerpts\n[Nessun estratto file incluso nel budget corrente.]")
+        final_context = "\n\n".join(parts)
+        if len(final_context) <= max_total_chars or not selected_sections:
+            if len(final_context) > max_total_chars:
+                truncation_notice = "\n\n[... subsystem context troncato per rispettare il budget totale ...]"
+                allowed = max(0, max_total_chars - len(truncation_notice))
+                final_context = final_context[:allowed] + truncation_notice
+            return final_context
+        selected_sections.pop()
+        omitted_due_to_budget += 1
+
 
 class AuditEngine:
     """Main audit engine"""
@@ -600,10 +846,17 @@ class AuditEngine:
         progress_callback: Optional[Any] = None,
         include_paths: Optional[List[str]] = None,
         checkpoint_file: Optional[str] = None,
+        context_mode: str = DEFAULT_CONTEXT_MODE,
+        base_analysis_context: str = "",
+        custom_audit_prompt: str = "",
+        subsystem_context_options: Optional[Dict[str, Any]] = None,
     ) -> List[AnalysisResult]:
         """Run audit on a project using configured analyzer backends."""
         logger.info(f"Starting audit on {project_path}")
-        
+        project_root = Path(project_path).resolve()
+        normalized_context_mode = _normalize_context_mode(context_mode)
+        normalized_custom_prompt = _normalize_custom_audit_prompt(custom_audit_prompt)
+
         # Discover files
         files = self.discover_files(project_path, platform, include_paths=include_paths)
         
@@ -655,8 +908,28 @@ class AuditEngine:
         all_results: List[AnalysisResult] = []
         completed_tasks: set[Tuple[str, str]] = set()
         results_lock = threading.Lock()
-        total_tasks = len(files) * len(analysis_types)
+        runtime_analysis_types = _build_runtime_analysis_types(
+            platform,
+            custom_audit_prompt=normalized_custom_prompt,
+        )
+        selected_analysis_types: List[str] = []
+        for raw_analysis_type in analysis_types:
+            key = str(raw_analysis_type or "").strip()
+            if key and key not in selected_analysis_types:
+                selected_analysis_types.append(key)
+        if normalized_custom_prompt and CUSTOM_PROMPT_ANALYSIS_TYPE_KEY not in selected_analysis_types:
+            selected_analysis_types.append(CUSTOM_PROMPT_ANALYSIS_TYPE_KEY)
+
+        total_tasks = len(files) * len(selected_analysis_types)
         done_counter = [0]  # lista per mutabilità in closure
+        subsystem_context = ""
+        if normalized_context_mode == SUBSYSTEM_CONTEXT_MODE:
+            subsystem_context = _build_subsystem_context(
+                project_root=project_root,
+                files=files,
+                include_paths=include_paths,
+                subsystem_context_options=subsystem_context_options,
+            )
 
         if checkpoint_path.exists():
             try:
@@ -714,9 +987,23 @@ class AuditEngine:
             except Exception as exc:
                 logger.warning("Checkpoint write failed: %s", exc)
 
+        def _build_analysis_context(_file_path: str, analysis_type: AnalysisType) -> str:
+            parts: List[str] = []
+            if base_analysis_context:
+                parts.append(f"## Runtime guidance\n{str(base_analysis_context).strip()}")
+
+            if (
+                normalized_context_mode == SUBSYSTEM_CONTEXT_MODE
+                and SUBSYSTEM_CONTEXT_MODE in getattr(analysis_type, "scope", [])
+                and subsystem_context
+            ):
+                parts.append(subsystem_context)
+
+            return "\n\n".join(part for part in parts if part)
+
         def _analyze_one(file_path: str, analysis_type_name: str) -> AnalysisResult:
             """Analizza un singolo file/tipo — eseguito in thread pool."""
-            analysis_type = platform.analysis_types.get(analysis_type_name)
+            analysis_type = runtime_analysis_types.get(analysis_type_name)
             if not analysis_type:
                 return AnalysisResult(
                     file_path=file_path,
@@ -747,6 +1034,7 @@ class AuditEngine:
             score: Optional[int] = None
             success = False
             errors: List[str] = []
+            analysis_context = _build_analysis_context(file_path, analysis_type)
 
             def _run():
                 nonlocal success, score
@@ -757,6 +1045,7 @@ class AuditEngine:
                         context={
                             "analysis_type": analysis_type,
                             "analysis_type_name": analysis_type_name,
+                            "analysis_context": analysis_context,
                             "project_path": project_path,
                         },
                     )
@@ -796,7 +1085,7 @@ class AuditEngine:
         tasks = [
             (fp, at)
             for fp in files
-            for at in analysis_types
+            for at in selected_analysis_types
             if (fp, at) not in completed_tasks
         ]
 

@@ -56,6 +56,7 @@ class AiderAnalyzer(BaseAnalyzer):
 
         context = context or {}
         analysis_type = context.get("analysis_type")
+        analysis_context = context.get("analysis_context") or ""
         project_path = context.get("project_path", ".")
 
         if analysis_type is None:
@@ -71,6 +72,7 @@ class AiderAnalyzer(BaseAnalyzer):
                 file_path=file_path,
                 analysis_type=analysis_type,
                 project_path=project_path,
+                analysis_context=analysis_context,
             )
             findings, score = self._integration.extract_findings_and_score(parsed_json)
         except Exception as exc:
