@@ -25,6 +25,10 @@ CUSTOM_PROMPT_ANALYSIS_TYPE_KEY = "custom_prompt"
 CUSTOM_PROMPT_ANALYSIS_TYPE_NAME = "Custom audit prompt"
 
 
+class AuditCancelledError(Exception):
+    """Raised when an audit run is cancelled by the host runtime."""
+
+
 # ============================================================================
 # Data Classes
 # ============================================================================
@@ -845,6 +849,7 @@ class AuditEngine:
         use_linting: bool = True,
         progress_callback: Optional[Any] = None,
         result_callback: Optional[Any] = None,
+        cancel_callback: Optional[Any] = None,
         include_paths: Optional[List[str]] = None,
         checkpoint_file: Optional[str] = None,
         context_mode: str = DEFAULT_CONTEXT_MODE,
@@ -857,6 +862,18 @@ class AuditEngine:
         project_root = Path(project_path).resolve()
         normalized_context_mode = _normalize_context_mode(context_mode)
         normalized_custom_prompt = _normalize_custom_audit_prompt(custom_audit_prompt)
+
+        def _is_cancel_requested() -> bool:
+            if not cancel_callback:
+                return False
+            try:
+                return bool(cancel_callback())
+            except Exception:
+                logger.exception("Audit cancellation callback failed")
+                return False
+
+        if _is_cancel_requested():
+            raise AuditCancelledError("Audit cancelled before execution started")
 
         # Discover files
         files = self.discover_files(project_path, platform, include_paths=include_paths)
@@ -1102,7 +1119,8 @@ class AuditEngine:
             except Exception:
                 pass
 
-        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="inneraudit") as pool:
+        pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="inneraudit")
+        try:
             future_to_task = {
                 pool.submit(_analyze_one, fp, at): (fp, at)
                 for fp, at in tasks
@@ -1140,6 +1158,13 @@ class AuditEngine:
                         progress_callback(done_now, total_tasks, fp)
                     except Exception:
                         pass
+                if _is_cancel_requested():
+                    for pending_future in future_to_task:
+                        if not pending_future.done():
+                            pending_future.cancel()
+                    raise AuditCancelledError("Audit cancelled by request")
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
 
         logger.info(
             "Audit completato: %d/%d task, checkpoint=%s",

@@ -18,6 +18,7 @@ from analyzers.base import AnalysisResult as BackendAnalysisResult
 from analyzers.llm_analyzer import ExternalLLMAnalyzer
 from audit_engine import (
     CUSTOM_PROMPT_ANALYSIS_TYPE_KEY,
+    AuditCancelledError,
     ConfigManager,
     AuditEngine,
 )
@@ -352,6 +353,54 @@ class TestAuditEngineContextModes:
         ]
         assert len(checkpoint_entries) == 2
         assert all("completed_at" in entry for entry in checkpoint_entries)
+
+    def test_cancel_callback_stops_after_safe_boundary(self, tmp_path, monkeypatch):
+        analyzed_files = []
+        cancel_state = {"requested": False}
+
+        def _capture(file_path, _content, _context):
+            analyzed_files.append(Path(file_path).name)
+
+        _install_fake_audit_analyzer(monkeypatch, _capture)
+
+        config_path = _write_config(
+            tmp_path,
+            lambda cfg: cfg.update(
+                {
+                    "aider": {**cfg["aider"], "enabled": False},
+                    "analyzers": {
+                        "llm": {"enabled": True},
+                    },
+                }
+            ),
+        )
+        project_dir = tmp_path / "project"
+        (project_dir / "pkg").mkdir(parents=True)
+        (project_dir / "pkg" / "alpha.py").write_text("def alpha():\n    return 'alpha'\n", encoding="utf-8")
+        (project_dir / "pkg" / "beta.py").write_text("def beta():\n    return 'beta'\n", encoding="utf-8")
+
+        config_manager = ConfigManager(config_path)
+        engine = AuditEngine(config_manager)
+        platform = config_manager.get_platform("python")
+        model = config_manager.get_model_by_id(config_manager.config["default_model"])
+
+        def _result_callback(_result, _done, _total):
+            cancel_state["requested"] = True
+
+        with pytest.raises(AuditCancelledError):
+            engine.run_audit(
+                str(project_dir),
+                model,
+                platform,
+                ["performance"],
+                use_linting=False,
+                include_paths=["pkg"],
+                checkpoint_file=str(tmp_path / "cancel_checkpoint.jsonl"),
+                result_callback=_result_callback,
+                cancel_callback=lambda: cancel_state["requested"],
+            )
+
+        assert 1 <= len(analyzed_files) <= 2
 
     def test_single_file_mode_keeps_only_runtime_guidance(self, tmp_path, monkeypatch):
         captured_contexts = {}
