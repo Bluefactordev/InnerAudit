@@ -844,6 +844,7 @@ class AuditEngine:
         analysis_types: List[str],
         use_linting: bool = True,
         progress_callback: Optional[Any] = None,
+        result_callback: Optional[Any] = None,
         include_paths: Optional[List[str]] = None,
         checkpoint_file: Optional[str] = None,
         context_mode: str = DEFAULT_CONTEXT_MODE,
@@ -981,6 +982,7 @@ class AuditEngine:
                     "score": result.score,
                     "error": result.error,
                     "execution_time": result.execution_time,
+                    "completed_at": time.time(),
                 }
                 with open(checkpoint_path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -1126,6 +1128,12 @@ class AuditEngine:
 
                 # Salvataggio progressivo su disco
                 _save_checkpoint(result)
+
+                if result_callback:
+                    try:
+                        result_callback(result, done_now, total_tasks)
+                    except Exception:
+                        pass
 
                 if progress_callback:
                     try:

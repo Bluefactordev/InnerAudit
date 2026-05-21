@@ -275,6 +275,83 @@ class TestAuditEngineContextModes:
             "performance",
             CUSTOM_PROMPT_ANALYSIS_TYPE_KEY,
         }
+        assert all("completed_at" in entry for entry in checkpoint_entries)
+
+    def test_resume_only_processes_missing_tasks_and_streams_new_results(self, tmp_path, monkeypatch):
+        streamed_results = []
+        analyzed_files = []
+        checkpoint_path = tmp_path / "resume_checkpoint.jsonl"
+
+        def _capture(file_path, _content, _context):
+            analyzed_files.append(Path(file_path).name)
+
+        _install_fake_audit_analyzer(monkeypatch, _capture)
+
+        config_path = _write_config(
+            tmp_path,
+            lambda cfg: cfg.update(
+                {
+                    "aider": {**cfg["aider"], "enabled": False},
+                    "analyzers": {
+                        "llm": {"enabled": True},
+                    },
+                }
+            ),
+        )
+        project_dir = tmp_path / "project"
+        (project_dir / "pkg").mkdir(parents=True)
+        alpha_path = project_dir / "pkg" / "alpha.py"
+        beta_path = project_dir / "pkg" / "beta.py"
+        alpha_path.write_text("def alpha():\n    return 'alpha'\n", encoding="utf-8")
+        beta_path.write_text("def beta():\n    return 'beta'\n", encoding="utf-8")
+        checkpoint_path.write_text(
+            json.dumps(
+                {
+                    "file_path": str(alpha_path.resolve()),
+                    "analysis_type": "performance",
+                    "success": True,
+                    "findings": [],
+                    "score": None,
+                    "error": None,
+                    "execution_time": 0.01,
+                    "completed_at": 1_716_000_000.0,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        config_manager = ConfigManager(config_path)
+        engine = AuditEngine(config_manager)
+        platform = config_manager.get_platform("python")
+        model = config_manager.get_model_by_id(config_manager.config["default_model"])
+
+        results = engine.run_audit(
+            str(project_dir),
+            model,
+            platform,
+            ["performance"],
+            use_linting=False,
+            include_paths=["pkg"],
+            checkpoint_file=str(checkpoint_path),
+            result_callback=lambda result, done, total: streamed_results.append(
+                (Path(result.file_path).name, result.analysis_type, done, total)
+            ),
+        )
+
+        assert sorted((Path(result.file_path).name, result.analysis_type) for result in results) == [
+            ("alpha.py", "performance"),
+            ("beta.py", "performance"),
+        ]
+        assert analyzed_files == ["beta.py"]
+        assert streamed_results == [("beta.py", "performance", 2, 2)]
+        checkpoint_entries = [
+            json.loads(line)
+            for line in checkpoint_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        assert len(checkpoint_entries) == 2
+        assert all("completed_at" in entry for entry in checkpoint_entries)
 
     def test_single_file_mode_keeps_only_runtime_guidance(self, tmp_path, monkeypatch):
         captured_contexts = {}
